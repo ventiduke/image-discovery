@@ -341,3 +341,53 @@ def test_catalog_overview(content, tmp_path):
     assert set(kinds) == {"maps", "characters", "characters.abilities"}
     assert (kinds["maps"]["entries"], kinds["maps"]["with_images"], kinds["maps"]["other_languages"]) == (2, 1, 2)
     assert kinds["characters"]["description"] == 1
+
+
+def test_uses_shapes_and_sizes(content, tmp_path):
+    from imagefind.measure import Measures
+
+    db = db_of(tmp_path)
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        conn.execute("UPDATE images SET width = 1920, height = 1080 WHERE path = 'Maps/M1.png'")
+        conn.execute("UPDATE images SET width = 1600, height = 400 WHERE path = 'Maps/M1_splash.png'")
+        conn.execute("UPDATE images SET width = 256, height = 256 WHERE path = 'Abilities/C1_Ability1.png'")
+        conn.commit()
+        calm = Measures(0.0, 1.0, 0.3, 0.1, 0.05, "left", 0.02, 0.2)
+        icon = Measures(0.6, 0.8, 0.9, 0.1, 0.2, "center", 0.1, 0.5)
+        index.save_analysis(conn, [("Maps/M1.png", None, calm), ("Maps/M1_splash.png", None, calm),
+                                   ("Abilities/C1_Ability1.png", {}, icon)])
+        everything = F("Maps", "Abilities")
+        assert paths(conn, F("Maps", "Abilities", uses=["background"])) == ["Maps/M1.png"]
+        # The wide banner first: its own shape; then the landscape one, croppable with a calm side.
+        assert [r["path"] for r in index.list_images(conn, F("Maps", "Abilities", uses=["header"]))[1]] == \
+            ["Maps/M1.png", "Maps/M1_splash.png"]
+        assert paths(conn, F("Maps", "Abilities", uses=["icon"])) == ["Abilities/C1_Ability1.png"]
+        assert paths(conn, F("Maps", "Abilities", uses=["icon", "header"])) == []  # all must match
+        assert paths(conn, F("Maps", "Abilities", shapes=["banner"])) == ["Maps/M1_splash.png"]
+        assert paths(conn, F("Maps", "Abilities", shapes=["banner", "landscape"])) == \
+            ["Maps/M1.png", "Maps/M1_splash.png", "Maps/mystery.png"]  # the fixture's 64 x 32 PNG
+        assert paths(conn, F("Maps", "Abilities", min_width=1700)) == ["Maps/M1.png"]
+        assert paths(conn, F("Maps", "Abilities", min_height=500)) == ["Maps/M1.png"]
+        facets = index.facets(conn, everything)
+        assert {u["use"]: u["count"] for u in facets["uses"]} == {"background": 1, "header": 2, "icon": 1, "cutout": 0}
+        assert {s["shape"]: s["count"] for s in facets["shapes"]}["square"] >= 1
+        assert facets["measured"] == 3
+        m = index.measures_of(conn, "Abilities/C1_Ability1.png")
+        assert m["uses"] == ["icon"] and m["best_on"] == "dark" and m["text_color"] is None
+        assert index.measures_of(conn, "Maps/mystery.png") is None
+        assert index.image_detail(conn, "Maps/M1.png")["measures"]["text_color"] == "white"
+        with pytest.raises(ValueError, match="Unknown use"):
+            index.list_images(conn, F("Maps", uses=["poster"]))
+
+
+def test_existing_index_gains_new_tables(content, tmp_path):
+    db = db_of(tmp_path)
+    index.build(open_library(content), db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE image_measures")  # an index from before measurements
+        conn.execute("INSERT INTO analyzed VALUES ('Maps/M1.png')")
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM analyzed").fetchone()[0] == 1  # colours kept
+        assert conn.execute("SELECT COUNT(*) FROM image_measures").fetchone()[0] == 0

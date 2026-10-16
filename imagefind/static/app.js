@@ -16,7 +16,7 @@
   // What's shown; kept in the URL hash so a view can be bookmarked or reloaded.
   const state = {
     folders: new Set(), view: "images", sort: "name",
-    q: "", langs: false, colors: [], kinds: [], variants: [],
+    q: "", langs: false, colors: [], kinds: [], variants: [], uses: [], shapes: [],
   };
   // The grid: images loaded so far. `run` counts restarts, so a page that
   // arrives after a restart is dropped.
@@ -80,6 +80,8 @@
     state.colors = list("colors").map(Number).filter((n) => Number.isInteger(n));
     state.kinds = list("kinds");
     state.variants = list("variants");
+    state.uses = list("uses");
+    state.shapes = list("shapes");
   }
 
   function writeHash() {
@@ -89,7 +91,7 @@
     if (state.sort !== "name") p.set("sort", state.sort);
     if (state.q) p.set("q", state.q);
     if (state.langs) p.set("langs", "1");
-    for (const key of ["colors", "kinds", "variants"]) {
+    for (const key of ["colors", "kinds", "variants", "uses", "shapes"]) {
       if (state[key].length) p.set(key, state[key].join(","));
     }
     const hash = p.toString();
@@ -105,6 +107,8 @@
     for (const c of state.colors) p.append("color", c);
     for (const k of state.kinds) p.append("kind", k);
     for (const v of state.variants) p.append("variant", v);
+    for (const u of state.uses) p.append("use", u);
+    for (const s of state.shapes) p.append("shape", s);
     return p;
   }
 
@@ -233,12 +237,15 @@
     }
     for (const k of state.kinds) chip(kindLabel(k), "kind", () => { state.kinds = state.kinds.filter((x) => x !== k); });
     for (const v of state.variants) chip(`variant: ${v}`, "variant", () => { state.variants = state.variants.filter((x) => x !== v); });
+    const label = (list, key, value) => ((facets && facets[list].find((x) => x[key] === value)) || {}).label || value;
+    for (const u of state.uses) chip(`good for: ${label("uses", "use", u)}`, "good for", () => { state.uses = state.uses.filter((x) => x !== u); });
+    for (const s of state.shapes) chip(label("shapes", "shape", s), "shape", () => { state.shapes = state.shapes.filter((x) => x !== s); });
     const box = $("active-filters");
     box.hidden = !chips.length;
     if (!chips.length) { box.replaceChildren(); return; }
     const clear = el("button", { className: "link", textContent: "Clear all" });
     clear.addEventListener("click", () => {
-      Object.assign(state, { q: "", colors: [], kinds: [], variants: [] });
+      Object.assign(state, { q: "", colors: [], kinds: [], variants: [], uses: [], shapes: [] });
       syncControls();
       filtersChanged();
     });
@@ -300,7 +307,7 @@
     const facetList = (id, items, key, label, field) => {
       $(id).replaceChildren(...(ready ? items : []).map((item) => {
         const value = item[key];
-        const b = el("button", { className: "facet-btn" }, label(value), el("span", { className: "n", textContent: ` ${fmt(item.count)}` }));
+        const b = el("button", { className: "facet-btn", title: item.description || "" }, label(value, item), el("span", { className: "n", textContent: ` ${fmt(item.count)}` }));
         b.setAttribute("aria-pressed", String(state[field].includes(value)));
         b.addEventListener("click", () => { state[field] = toggle(state[field], value); filtersChanged(); });
         return el("li", {}, b);
@@ -308,6 +315,11 @@
     };
     facetList("kind-list", ready ? facets.kinds : [], "kind", kindLabel, "kinds");
     facetList("variant-list", ready ? facets.variants : [], "variant", (v) => v, "variants");
+    facetList("use-list", ready ? facets.uses : [], "use", (v, item) => item.label, "uses");
+    facetList("shape-list", ready ? facets.shapes : [], "shape", (v, item) => item.label, "shapes");
+    $("uses-hint").textContent = ready && facets.measured < facets.colors_total
+      ? `Measured ${fmt(facets.measured)} of ${fmt(facets.colors_total)} images so far.`
+      : "Worked out from each image's size, shape, transparency and detail. Hover for the rule.";
   }
 
   // -- image grid -------------------------------------------------------------
@@ -509,6 +521,7 @@
     } else if (!d.analyzed) {
       body.push(el("h3", { textContent: "Colors" }), el("p", { className: "hint", textContent: "Not worked out yet." }));
     }
+    if (!entry) body.push(...suitability(d));
 
     if (entry) {
       const rows = [];
@@ -527,6 +540,7 @@
       row("File", el("code", { textContent: image.path }));
       if (image.width) row("Size", `${image.width} × ${image.height} px`);
       body.push(el("h3", { textContent: "Details" }), el("table", { className: "facts" }, el("tbody", {}, rows)));
+      body.push(...suitability(d));
 
       if (d.parent) {
         body.push(el("h3", { textContent: `Part of · ${kindLabel(d.parent.kind)}` }),
@@ -559,6 +573,34 @@
     }
     $("d-body").replaceChildren(...body);
     $("d-body").scrollTop = 0;
+  }
+
+  // What the image is good for, and the measurements behind it.
+  function suitability(d) {
+    const m = d.measures;
+    if (!m) return [el("h3", { textContent: "Good for" }), el("p", { className: "hint", textContent: "Not measured yet." })];
+    const labels = { background: "Slide background", header: "Section header", icon: "Icon / spot art", cutout: "Cut-out" };
+    const pctOf = (x) => `${Math.round(x * 100)}%`;
+    const level = (x, low, high) => (x < low ? "low" : x > high ? "high" : "medium");
+    const rows = [
+      ["Transparent", `${pctOf(m.transparent)} of the image`],
+      ["Subject fills", `${pctOf(m.fill)} of the frame`],
+      ["Brightness", `${pctOf(m.brightness)}`],
+      ["Detail (busyness)", `${level(m.busyness, 0.05, 0.12)} (${m.busyness.toFixed(3)})`],
+    ];
+    if (m.best_on) rows.push(["Shows up on", m.best_on === "any" ? "light or dark backgrounds" : `${m.best_on} backgrounds`]);
+    if (m.text_color) rows.push(["Room for text", `${m.calm_side} side, in ${m.text_color}`]);
+    const chips = m.uses.length
+      ? el("div", { className: "chips" }, m.uses.map((u) => {
+        const b = el("button", { className: "facet-btn", textContent: labels[u] || u, title: "Show images good for this" });
+        b.setAttribute("aria-pressed", String(state.uses.includes(u)));
+        b.addEventListener("click", () => { state.uses = toggle(state.uses, u); filtersChanged(); renderDetail(d); });
+        return b;
+      }))
+      : el("p", { className: "hint", textContent: "None of the standard uses (background, header, icon, cut-out)." });
+    return [el("h3", { textContent: "Good for" }), chips,
+      el("table", { className: "facts" }, el("tbody", {}, rows.map(([k, v]) =>
+        el("tr", {}, el("th", { textContent: k }), el("td", { textContent: v })))))];
   }
 
   $("d-close").addEventListener("click", closeDetail);

@@ -14,6 +14,7 @@ See [docs/PLAN.md](docs/PLAN.md) for the full design.
 | 4. Search, filters, colors, details panel | Done |
 | 5. Relationships (collections, "show all" links) | Partly done (details panel shows parents, contents and links) |
 | 6. Full dump and refresh | Not started |
+| Agent access (find, sheet, export, "good for") | Done; rules to be tuned on the real images |
 
 ## Running it
 
@@ -39,11 +40,13 @@ A browser tab opens on the repo's `content` folder. Use **Change folder…** to 
 **Filter.** In the sidebar:
 
 - **Colors**: each image's main colors, worked out in the background after indexing. Click a swatch (the number is how many images have that color) to show images with at least 10% of it, best matches first. Pick several to need all of them.
+- **Good for**: what each image suits, worked out from its size, shape, transparency and amount of detail. **Slide background** (opaque, landscape, at least 1600 px wide, not too busy), **Section header** (a wide banner, or a big landscape image with a calm side for the title), **Icon / spot art** (transparent, squarish, subject filling the frame) and **Cut-out** (transparent and large). Hover one for its rule.
+- **Shape**: wide banner, landscape, square-ish or portrait.
 - **Kind** and **Variant**: the kind of catalog item (weapon skins › chromas, player cards, …) and the file variant.
 
 The counts follow the other filters, and the filters in use show above the grid, where you can remove them one at a time or all at once. The address bar keeps everything, so you can bookmark a view.
 
-**Details.** Click a tile to open its details: a large preview, its other variants, its colors (click one to filter by it), and everything the catalog says about it. Fields that point at another item, like a skin's weapon, are links; the panel also shows what the item belongs to, what it contains and what links to it (a weapon's skins). Use ← and → to step through the grid and Esc to close. **Copy path** and **Copy ID** copy to the clipboard; Ctrl+click a tile to open the full image in a new tab instead.
+**Details.** Click a tile to open its details: a large preview, its other variants, its colors (click one to filter by it), what it's good for (with the measurements behind it: how transparent, how detailed, which backgrounds it shows up on, and which side has room for a title in white or black text), and everything the catalog says about it. Fields that point at another item, like a skin's weapon, are links; the panel also shows what the item belongs to, what it contains and what links to it (a weapon's skins). Use ← and → to step through the grid and Esc to close. **Copy path** and **Copy ID** copy to the clipboard; Ctrl+click a tile to open the full image in a new tab instead.
 
 **Match report.** The **Match report** tab shows how the files match the catalog (per folder, which catalog kinds and variants it holds, and any files that match nothing) and **what the catalog holds**: for each kind of item, how often it has a description, names in other languages, and each other field, with example values.
 
@@ -62,6 +65,31 @@ uv run imagefind --report          # print how the images match the catalog, the
 ```
 
 **Checking a new content drop.** `uv run imagefind --report` prints, for each folder, how many files matched a catalog entry, which variants (`splash`, `killstream`, …) it found, and the files that match nothing. The page shows the same report.
+
+## For AI agents
+
+An agent (Claude Code, for example) can find and export images for slides and reports from the command line, without the page:
+
+```
+uv run imagefind find ascent --use header            # list candidates (add --json for structured output)
+uv run imagefind sheet ascent --use header --out c.png   # the same as one numbered contact sheet to look at
+uv run imagefind export Maps/<file>.png --out header.png --fit 1600x400   # copy out, cropped to size
+uv run imagefind stats                               # how the images measure, per folder
+```
+
+`find` and `sheet` take the same filters as the page: search words, `--use background|header|icon|cutout`, `--color` (by name, e.g. `red`, `"dark blue"`), `--shape`, `--folder`, `--kind`, `--variant`, `--min-width`, `--min-height`. Each result gives the full path, catalog name, size, main colors, what it's good for, and hints such as "best on dark backgrounds" (many icons are white silhouettes) or which side has room for a title. `export` copies an image out (never into the content folder), optionally resized to an exact size: `--mode cover` crops to fill, `--mode contain` pads with transparency.
+
+The first command after a new content drop prepares every image (thumbnails, colors, measurements), which takes a minute or two; after that, commands take about a second.
+
+**Teach Claude Code to use it** by installing the `image-assets` skill once:
+
+```
+uv run imagefind install-skill
+```
+
+It goes to `~/.claude/skills/image-assets/`, with this folder's location filled in, so Claude Code can use the library from any project: ask it for "a section header image for the Ascent slide" and it searches, looks at a contact sheet, and exports the one it picks. Run it again after moving this folder or updating the tool.
+
+**Tuning.** The "good for" rules are first guesses. `uv run imagefind stats` prints how each folder measures and how many images each rule picks; the rules live in `imagefind/measure.py`.
 
 ## The content folder
 

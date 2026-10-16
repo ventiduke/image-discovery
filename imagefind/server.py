@@ -13,11 +13,10 @@ from typing import Callable
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from PIL import Image
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import colors, index, picker, thumbs
+from . import analysis, index, measure, picker, thumbs
 from .library import Library, LibraryError, open_library
 from .presence import Presence
 
@@ -130,56 +129,7 @@ class Session:
                 warmer.stop()
 
     def _start_warmer(self, ready: Ready) -> thumbs.Warmer:
-        """Make missing thumbnails and work out colours, in the background.
-
-        Colours are read from the thumbnail (or the image itself when it's
-        small), so each large image is decoded only once. Results are written
-        to the index in batches.
-        """
-        with closing(index.connect(ready.db_path)) as conn:
-            rows = index.all_images(conn)
-        jobs = []
-        for row in rows:
-            target = None
-            if thumbs.needs_thumbnail(row["width"], row["height"]):
-                target = thumbs.thumb_path(ready.thumbs_dir, row["path"], row["size"], row["mtime_ns"])
-            missing = target is not None and not target.exists()
-            if missing or not row["analyzed"]:
-                jobs.append((row["path"], ready.root / row["path"], target, bool(row["analyzed"])))
-
-        pending: list[tuple[str, dict]] = []
-        lock = threading.Lock()
-        conn = index.connect(ready.db_path)
-
-        def flush(final: bool = False) -> None:
-            with lock:
-                batch = pending[:]
-                pending.clear()
-                if batch:
-                    index.save_colors(conn, batch)
-                if final:
-                    conn.close()
-
-        def process(job) -> None:
-            path, source, target, analyzed = job
-            im = None
-            if target is not None and not target.exists():
-                im = thumbs.shrink(source)
-                thumbs.save(im, target)
-            if analyzed:
-                return
-            if im is None:
-                with Image.open(target if target is not None else source) as opened:
-                    shares = colors.analyze(opened)
-            else:
-                shares = colors.analyze(im)
-            with lock:
-                pending.append((path, shares))
-                full = len(pending) >= 200
-            if full:
-                flush()
-
-        return thumbs.Warmer(jobs, total=len(jobs), process=process, on_finish=lambda: flush(final=True))
+        return analysis.start(ready.root, ready.db_path, ready.thumbs_dir)
 
     def _publish(self, generation: int, status: dict) -> None:
         with self._lock:
@@ -265,8 +215,15 @@ def create_app(
         color: list[int] = Query(default=[]),
         kind: list[str] = Query(default=[]),
         variant: list[str] = Query(default=[]),
+        use: list[str] = Query(default=[]),
+        shape: list[str] = Query(default=[]),
+        min_width: int = Query(default=0, ge=0),
+        min_height: int = Query(default=0, ge=0),
     ) -> index.Filters:
-        return index.Filters(folder, q, langs, color, kind, variant)
+        unknown = [u for u in use if u not in measure.USES] + [s for s in shape if s not in measure.SHAPES]
+        if unknown:
+            raise HTTPException(400, f"Unknown filter value: {', '.join(unknown)}")
+        return index.Filters(folder, q, langs, color, kind, variant, use, shape, min_width, min_height)
 
     def _ready_or_409() -> Ready:
         ready = session.ready

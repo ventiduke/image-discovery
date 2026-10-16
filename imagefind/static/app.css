@@ -2,14 +2,15 @@
   --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6576;
   --border: #d9dde5; --hover: #eef1f6; --accent: #2457d6; --accent-text: #ffffff;
   --error: #b42318; --warn-bg: #fff6e0; --warn-border: #f0d48a; --warn-text: #6b4d00;
-  --checker-a: #ffffff; --checker-b: #eceef2;
+  /* Mid grey, so white silhouettes and dark art both show. */
+  --checker-a: #b4b8bf; --checker-b: #a6aab2;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #14171d; --panel: #1d2129; --text: #e7e9ee; --muted: #9aa2b1;
     --border: #333a47; --hover: #262b35; --accent: #6b93ff; --accent-text: #0d1220;
     --error: #ff8a7a; --warn-bg: #3a2f12; --warn-border: #6b5520; --warn-text: #f3d998;
-    --checker-a: #23272f; --checker-b: #2b3039;
+    --checker-a: #5d626b; --checker-b: #535861;
   }
 }
 * { box-sizing: border-box; }

@@ -137,6 +137,12 @@ def test_images_take_filters(ready):
     assert ready.get("/api/images", params={"folder": "Weapons", "color": "x"}).status_code == 422
 
 
+def test_unknown_filter_values_are_refused(ready):
+    res = ready.get("/api/images", params={"folder": "Maps", "use": "poster"})
+    assert res.status_code == 400 and "poster" in res.json()["error"]
+    assert ready.get("/api/facets", params={"folder": "Maps", "shape": "round"}).status_code == 400
+
+
 def test_facets_detail_and_catalog(ready):
     facets = ready.get("/api/facets", params={"folder": ["Maps", "Weapons"]}).json()
     assert len(facets["colors"]) == 28 and facets["colors_analyzed"] == 0  # not worked out (warming is off)
@@ -185,6 +191,7 @@ def test_thumbnails_are_warmed_after_indexing(tmp_path):
     folders = {"folder": ["Maps", "Weapons"]}
     facets = c.get("/api/facets", params=folders).json()
     assert facets["colors_analyzed"] == facets["colors_total"] == 74
+    assert facets["measured"] == 74 and len(facets["uses"]) == 4
     assert sum(col["count"] for col in facets["colors"]) > 0
     # Opening the folder again finds nothing left to do.
     c.post("/api/open", json={"path": str(CONTENT)})

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import uvicorn
 
-from . import index
+from . import cli, index
 from .catalog import CatalogError
 from .library import LibraryError, open_library
 from .presence import Presence
@@ -48,9 +48,14 @@ def _bind(port: int) -> socket.socket:
 
 
 def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in cli.COMMANDS:
+        cli.main(argv)
+        return
     parser = argparse.ArgumentParser(
         prog="imagefind",
-        description="Browse and search a folder of catalogued images.",
+        description="Browse and search a folder of catalogued images. For agents and scripts, "
+        "see also: imagefind find | sheet | export | stats | install-skill (each has --help).",
     )
     parser.add_argument(
         "path", nargs="?", help="content folder to open (default: the repo's content folder)"

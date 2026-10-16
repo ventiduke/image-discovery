@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import catalog as catalog_mod
-from . import colors, scan
+from . import colors, measure, scan
 from .library import Library
 
 SCHEMA_VERSION = "2"
@@ -54,6 +54,14 @@ CREATE TABLE image_colors (path TEXT, bin INTEGER, weight REAL, PRIMARY KEY (pat
 CREATE INDEX image_colors_bin ON image_colors(bin, weight);
 CREATE TABLE analyzed (path TEXT PRIMARY KEY);
 """
+# Tables added since schema 2. Created on open if missing, so an existing
+# index keeps its colours instead of being rebuilt.
+ADDITIONS = """
+CREATE TABLE IF NOT EXISTS image_measures (
+    path TEXT PRIMARY KEY, transparent REAL, fill REAL, brightness REAL, contrast REAL,
+    busyness REAL, calm_side TEXT, calm_busyness REAL, calm_brightness REAL
+);
+"""
 
 Progress = Callable[[int, int], None]
 
@@ -79,7 +87,9 @@ def cache_dir(root: Path) -> Path:
 
 
 def connect(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, check_same_thread=False)
+    # A generous timeout: the page's background work and a command-line run
+    # may write at the same time.
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=60)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     return conn
@@ -134,7 +144,7 @@ def build(library: Library, db_path: Path, *, rebuild: bool = False,
         with conn:
             conn.execute("DELETE FROM images")
             conn.executemany("INSERT INTO images VALUES (?,?,?,?,?,?,?,?,?)", rows)
-            for table in ("image_colors", "analyzed"):
+            for table in ("image_colors", "analyzed", "image_measures"):
                 conn.executemany(f"DELETE FROM {table} WHERE path = ?", ((p,) for p in stale))
             _set_meta(conn, built_at=str(int(time.time())))
         if progress:
@@ -155,6 +165,8 @@ def _open(db_path: Path) -> sqlite3.Connection:
         with conn:
             conn.executescript(SCHEMA)
             _set_meta(conn, schema=SCHEMA_VERSION)
+    with conn:
+        conn.executescript(ADDITIONS)
     return conn
 
 
@@ -296,7 +308,8 @@ SORTS = {
     "folder": "i.folder COLLATE NOCASE, COALESCE(NULLIF(e.name, ''), i.stem) COLLATE NOCASE, i.variant, i.path",
     "size": "i.size DESC, i.path",
 }
-FROM = "FROM images i LEFT JOIN entries e ON e.key = i.entry_key"
+FROM = ("FROM images i LEFT JOIN entries e ON e.key = i.entry_key "
+        "LEFT JOIN image_measures m ON m.path = i.path")
 BASE_VARIANT = "base"  # how the filters name images with no variant
 
 
@@ -304,8 +317,8 @@ BASE_VARIANT = "base"  # how the filters name images with no variant
 class Filters:
     """What the grid shows: images in these folders that match everything else.
 
-    Several colours must all match; several kinds or variants match
-    any of them.
+    Several colours or uses must all match; several kinds, variants or
+    shapes match any of them.
     """
 
     folders: list[str]
@@ -314,6 +327,10 @@ class Filters:
     colors: list[int] = field(default_factory=list)
     kinds: list[str] = field(default_factory=list)
     variants: list[str] = field(default_factory=list)
+    uses: list[str] = field(default_factory=list)
+    shapes: list[str] = field(default_factory=list)
+    min_width: int = 0
+    min_height: int = 0
 
 
 def fts_query(q: str, all_languages: bool = False) -> str | None:
@@ -351,6 +368,22 @@ def _where(f: Filters, skip: str = "") -> tuple[str, list]:
     if f.variants and skip != "variants":
         conds.append(f"i.variant IN ({','.join('?' * len(f.variants))})")
         args += ["" if v == BASE_VARIANT else v for v in f.variants]
+    if skip != "uses":
+        for use in f.uses:
+            if use not in measure.USES:
+                raise ValueError(f"Unknown use: {use}. Known: {', '.join(measure.USES)}")
+            conds.append(f"({measure.USES[use][2]})")
+    if f.shapes and skip != "shapes":
+        unknown = set(f.shapes) - set(measure.SHAPES)
+        if unknown:
+            raise ValueError(f"Unknown shape: {', '.join(sorted(unknown))}. Known: {', '.join(measure.SHAPES)}")
+        conds.append("(" + " OR ".join(f"({measure.SHAPES[s][1]})" for s in f.shapes) + ")")
+    if f.min_width:
+        conds.append("i.width >= ?")
+        args.append(f.min_width)
+    if f.min_height:
+        conds.append("i.height >= ?")
+        args.append(f.min_height)
     return " AND ".join(conds), args
 
 
@@ -358,7 +391,8 @@ def list_images(conn: sqlite3.Connection, f: Filters, sort: str = "name",
                 offset: int = 0, limit: int = 200) -> tuple[int, list[dict]]:
     """One page of matching images, and how many match in all.
 
-    With a colour filter, the images with the most of those colours come first.
+    With a colour filter, the images with the most of those colours come
+    first; with a "good for" filter, the largest images come first.
     """
     where, args = _where(f)
     total = conn.execute(f"SELECT COUNT(*) {FROM} WHERE {where}", args).fetchone()[0]
@@ -368,6 +402,8 @@ def list_images(conn: sqlite3.Connection, f: Filters, sort: str = "name",
         order = (f"(SELECT SUM(weight) FROM image_colors c WHERE c.path = i.path "
                  f"AND c.bin IN ({','.join('?' * len(f.colors))})) DESC, {order}")
         order_args = list(f.colors)
+    elif f.uses:
+        order = f"i.width * i.height DESC, {order}"
     rows = conn.execute(
         f"SELECT i.path, i.folder, i.stem, i.variant, i.entry_key, i.size, i.mtime_ns, i.width, "
         f"i.height, e.name, e.kind {FROM} WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
@@ -393,15 +429,28 @@ def facets(conn: sqlite3.Connection, f: Filters) -> dict:
     variants = conn.execute(
         f"SELECT i.variant, COUNT(*) {FROM} WHERE {where} GROUP BY i.variant ORDER BY 2 DESC",
         args).fetchall()
+    where, args = _where(f, skip="uses")
+    use_counts = conn.execute(
+        "SELECT " + ", ".join(f"COALESCE(SUM({cond}), 0)" for _l, _d, cond in measure.USES.values())
+        + f" {FROM} WHERE {where}", args).fetchone()
+    where, args = _where(f, skip="shapes")
+    shape_counts = conn.execute(
+        "SELECT " + ", ".join(f"COALESCE(SUM({cond}), 0)" for _l, cond in measure.SHAPES.values())
+        + f" {FROM} WHERE {where}", args).fetchone()
     where, args = _where(Filters(f.folders))
-    analyzed, in_folders = conn.execute(
-        f"SELECT COUNT(a.path), COUNT(*) {FROM} LEFT JOIN analyzed a ON a.path = i.path WHERE {where}",
-        args).fetchone()
+    analyzed, measured, in_folders = conn.execute(
+        f"SELECT COUNT(a.path), COUNT(m.path), COUNT(*) {FROM} LEFT JOIN analyzed a ON a.path = i.path "
+        f"WHERE {where}", args).fetchone()
     return {
         "colors": [{"id": b.id, "name": b.name, "hex": b.hex, "count": color_counts.get(b.id, 0)}
                    for b in colors.BINS],
         "colors_analyzed": analyzed,
         "colors_total": in_folders,
+        "measured": measured,
+        "uses": [{"use": name, "label": label, "description": desc, "count": n}
+                 for (name, (label, desc, _c)), n in zip(measure.USES.items(), use_counts)],
+        "shapes": [{"shape": name, "label": label, "count": n}
+                   for (name, (label, _c)), n in zip(measure.SHAPES.items(), shape_counts)],
         "kinds": [{"kind": k, "count": n} for k, n in kinds],
         "variants": [{"variant": v or BASE_VARIANT, "count": n} for v, n in variants],
     }
@@ -433,6 +482,7 @@ def image_detail(conn: sqlite3.Connection, path: str) -> dict | None:
                                  (path,))
     ]
     detail["analyzed"] = conn.execute("SELECT 1 FROM analyzed WHERE path = ?", (path,)).fetchone() is not None
+    detail["measures"] = measures_of(conn, path)
     key = image["entry_key"]
     if not key:
         return detail
@@ -509,18 +559,49 @@ def image(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
 
 
 def all_images(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Every image, folder by folder, for making thumbnails ahead of time."""
+    """Every image, folder by folder, for making thumbnails and measuring ahead of time."""
     return conn.execute(
-        "SELECT i.path, i.size, i.mtime_ns, i.width, i.height, a.path IS NOT NULL AS analyzed "
+        "SELECT i.path, i.size, i.mtime_ns, i.width, i.height, a.path IS NOT NULL AS analyzed, "
+        "m.path IS NOT NULL AS measured "
         "FROM images i LEFT JOIN analyzed a ON a.path = i.path "
+        "LEFT JOIN image_measures m ON m.path = i.path "
         "ORDER BY i.folder COLLATE NOCASE, i.path"
     ).fetchall()
 
 
 def save_colors(conn: sqlite3.Connection, results: list[tuple[str, dict[int, float]]]) -> None:
+    save_analysis(conn, [(path, shares, None) for path, shares in results])
+
+
+def save_analysis(conn: sqlite3.Connection,
+                  results: list[tuple[str, dict[int, float] | None, measure.Measures | None]]) -> None:
+    """Store colours and/or measurements worked out in the background."""
     with conn:
-        for path, shares in results:
-            conn.execute("DELETE FROM image_colors WHERE path = ?", (path,))
-            conn.executemany("INSERT INTO image_colors VALUES (?, ?, ?)",
-                             ((path, b, w) for b, w in shares.items()))
-            conn.execute("INSERT OR IGNORE INTO analyzed VALUES (?)", (path,))
+        for path, shares, measures in results:
+            if shares is not None:
+                conn.execute("DELETE FROM image_colors WHERE path = ?", (path,))
+                conn.executemany("INSERT INTO image_colors VALUES (?, ?, ?)",
+                                 ((path, b, w) for b, w in shares.items()))
+                conn.execute("INSERT OR IGNORE INTO analyzed VALUES (?)", (path,))
+            if measures is not None:
+                m = measures
+                conn.execute("INSERT OR REPLACE INTO image_measures VALUES (?,?,?,?,?,?,?,?,?)",
+                             (path, m.transparent, m.fill, m.brightness, m.contrast, m.busyness,
+                              m.calm_side, m.calm_busyness, m.calm_brightness))
+
+
+MEASURE_FIELDS = ("transparent", "fill", "brightness", "contrast", "busyness",
+                  "calm_side", "calm_busyness", "calm_brightness")
+
+
+def measures_of(conn: sqlite3.Connection, path: str) -> dict | None:
+    """An image's measurements, what they suggest, and which uses it's good for."""
+    row = conn.execute(f"SELECT {', '.join(MEASURE_FIELDS)} FROM image_measures WHERE path = ?",
+                       (path,)).fetchone()
+    if row is None:
+        return None
+    m = measure.Measures(*row)
+    uses = [name for name, (_l, _d, cond) in measure.USES.items() if conn.execute(
+        f"SELECT 1 FROM images i JOIN image_measures m ON m.path = i.path WHERE i.path = ? AND ({cond})",
+        (path,)).fetchone()]
+    return {**dict(zip(MEASURE_FIELDS, row)), "text_color": m.text_color, "best_on": m.best_on, "uses": uses}
