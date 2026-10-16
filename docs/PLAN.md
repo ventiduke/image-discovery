@@ -10,16 +10,18 @@ Build a local tool that points at a content folder (one catalog JSON plus sub-fo
 
 - Runs locally with one command and opens in the browser (same setup as `local-html-edit`: `uv run imagefind`)
 - Works on Windows and macOS
-- Pick a content folder; the tool reads the catalog and indexes the image folders
+- Opens the repo's own `content/` folder by default (another folder can be passed or picked); the tool reads the catalog and indexes the image folders
 - Grid view of thumbnails with infinite scroll, filtered by folder(s)
-- Search by name, ID, description and other metadata, in any language the catalog carries
-- Detail panel for one image: full-size preview, its other variants, and its metadata
+- Search by name, ID, description and other metadata. English first; other languages as an option
+- Relationship filters: browse from a weapon to its skins, from a skin to its chromas and levels, and from a collection (e.g. "Reaver") to everything in it
+- Detail panel for one image: full-size preview, its other variants, its metadata and its related items
+- Handles the monthly content refresh: re-indexes automatically and can show what's new in this drop
 - Quick actions: copy file path, copy ID, open the containing folder
 
 **Out of scope for v1**
 
 - Editing the catalog or the images (the tool is read-only: it never writes inside the content folder)
-- Tagging, favourites or collections
+- Tagging, favourites or user-made collections
 - Hosting, multi-user access or auth
 - Image-content search (search by what an image looks like rather than its metadata)
 
@@ -39,6 +41,16 @@ Two things the tool must not assume:
 
 - **Folder names don't have to equal section names.** `Weapons` happens to match `weapons`, but the tool should match images to entries by ID across the whole catalog, not by folder name. Then a folder like `Skins` holding chroma images still resolves.
 - **Not every image will have a catalog entry, and not every entry will have an image.** Unmatched images still appear in the grid (searchable by filename); entries with no image can be counted in a "missing images" report.
+
+**The full dump** is about 11,000 files and over 1 GB, and it will live in this repo's `content/` folder, replaced about once a month.
+
+## Content in the repo
+
+- **Location.** The full dump goes in `content/` (catalog at the top, image folders below), replacing the sample. `uv run imagefind` with no argument opens it.
+- **Monthly refresh.** Delete the old `content/` contents and copy in the new drop, so images removed upstream don't linger. Commit with the catalog version in the message (e.g. "Content drop 13.07"). Git stores files by content, so images that are unchanged between drops add nothing to the repo's size; only new or changed images do.
+- **Uploading.** 11,000 files is too many for GitHub's "Add files via upload" page, which is how the sample went in (it takes about 100 files at a time). Use `git` or GitHub Desktop to commit and push the drop. GitHub rejects single files over 100 MB; the largest sample image is 3.3 MB, so this shouldn't come up, but the refresh script should check.
+- **Keep generated files out of the repo.** Thumbnails and the search index go in a git-ignored `.cache/` folder in the repo (or the user's cache directory). They are never committed.
+- **A small refresh helper** (`uv run imagefind refresh <path-to-drop>`): replaces `content/`, checks for oversize files and filenames that don't parse, and prints a summary (new, changed and removed images; the new catalog version) to paste into the commit message.
 
 ## Architecture
 
@@ -69,14 +81,16 @@ Dependencies: `fastapi`, `uvicorn`, `pillow`. SQLite with FTS5 ships with Python
 3. **Join on ID** (case-insensitive) and write everything to a SQLite database in the cache folder: an `images` table, an `entries` table and an FTS5 table over names, descriptions, IDs and filenames.
 4. **Reuse the index next time.** Store the catalog's `version`, its mtime, and each folder's file count and newest mtime; rebuild only what changed. `--rebuild` forces a full rebuild.
 
-The cache lives in the user's cache directory (`%LOCALAPPDATA%\imagefind` / `~/Library/Caches/imagefind`), keyed by a hash of the content folder's path.
+The cache lives in a git-ignored `.cache/` folder next to `content/` (for another content folder, in the user's cache directory, keyed by a hash of its path).
 
-**Why SQLite rather than in-memory search:** the full dump is expected to be much larger than the sample. SQLite keeps startup fast after the first run, FTS5 gives prefix and multi-word search for free, and filters (folder, section, variant, has-metadata) become simple `WHERE` clauses.
+**"New in this drop."** When the catalog `version` changes, the index keeps the previous drop's list of IDs and file hashes, so the grid can filter to images that are new or changed since the last drop.
+
+**Why SQLite rather than in-memory search:** with 11,000 files and about 10,500 catalog entries, holding everything in the browser is possible but slow to load. SQLite keeps startup fast after the first run, FTS5 gives prefix and multi-word search for free, and filters (folder, section, variant, has-metadata) become simple `WHERE` clauses.
 
 ### Thumbnails
 
-- Generated on demand on first request, at 320 px on the long side, saved as WebP in the cache folder and keyed by path + mtime.
-- A background worker pre-generates thumbnails for the folder being viewed so scrolling stays smooth.
+- Generated at 320 px on the long side, saved as WebP in the cache folder and keyed by path + mtime. At that size 11,000 thumbnails come to roughly 100–200 MB.
+- After indexing, a background worker generates every missing thumbnail (several processes in parallel, the folder being viewed first). The first run after a new drop takes a few minutes; the grid works meanwhile and makes any thumbnail it needs on request. Later runs only redo changed images.
 - Small images (already under the thumbnail size) are served as they are.
 - The grid uses `loading="lazy"` and requests one page of results at a time.
 
@@ -93,12 +107,35 @@ The cache lives in the user's cache directory (`%LOCALAPPDATA%\imagefind` / `~/L
 | `GET /thumb/{path}` / `GET /file/{path}` | Thumbnail / original image, limited to files inside the content folder |
 | `POST /api/reveal` | Show a file in Explorer or Finder |
 
+### Relationships
+
+Built from the catalog during indexing and stored as a `relations` table (from ID, to ID, kind), so each is a single filter:
+
+| Relationship | Source | Notes |
+| --- | --- | --- |
+| Skin → weapon | `weaponSkins[].weaponId` | All 1,415 skins have one |
+| Chroma / level → skin | nesting (`chromas`, `levels`) | 2,931 chromas, 2,692 levels |
+| Skin → default chroma | `defaultChromaId` | Used to pick the skin's cover image |
+| Charm / spray level → item | nesting (`levels`) | |
+| Weapon → category | `weapons[].category` | Rifle, SMG, Sniper, Sidearm, Shotgun, Heavy, Melee |
+| Character → abilities | nesting (`abilities`) | |
+| Collection (inferred) | names | See below |
+| Same item, other variants | shared ID | base / killstream / listview / splash |
+
+**Collections are inferred, not given.** The catalog has no bundle or collection field, but names follow a pattern: "Reaver Vandal", "Reaver Card", "Reaver Spray", "Reaver Buddy". Stripping the weapon name from a skin's name gives the collection name for 1,219 of the 1,415 skins (411 collections), and 323 of those also match a card, spray, buddy or title by name. To avoid false matches ("Prime Time Buddy" is not part of "Prime"), only the known suffixes count (`Card`, `Spray`, `Buddy`, `Title`, and the weapon names). The UI labels these as "Collection (from names)" so nobody mistakes them for official data. Characters don't link to their roles in the catalog, so there is no role filter unless the full dump adds that link.
+
+In the UI, relationships show up in three places:
+
+- **Filters** in the sidebar: weapon (with category), collection, and section.
+- **Detail panel**: a "Related" strip, e.g. for a skin: its weapon, its chromas and levels, and the rest of its collection. Each item is clickable.
+- **"Show all" links**: from a weapon, "all its skins"; from a collection, "everything in Reaver". These set the grid's filters, so they're bookmarkable like any other view.
+
 ## User interface
 
 One page, three areas:
 
 - **Left sidebar: folders.** A checkbox list of image folders with counts (select one, several or all). Below it, filters: catalog section, variant (base / killstream / listview / splash / …), and "only images with metadata" / "only images without metadata".
-- **Top bar: search.** Search as you type, debounced. Matches names in every language, descriptions, IDs and filenames, with prefix matching (`vand` finds "Vandal"). A language selector picks which name to show on the cards (default en-US). Sort by name, folder or file size.
+- **Top bar: search.** Search as you type, debounced. Matches English names, descriptions, IDs and filenames, with prefix matching (`vand` finds "Vandal"). Cards show English names. A "search all languages" toggle (off by default) also matches the 17 other languages, for when someone pastes a localized name. Sort by name, folder or file size.
 - **Main area: the grid.** Thumbnail cards with the name and a small variant badge, in a responsive grid with adjustable card size. Infinite scroll. A result count ("312 images"). Options to group the variants of one ID into a single card or show each file separately.
 - **Detail panel** (click a card; arrow keys move to the next card): large preview on a checkerboard background so transparent images read clearly, every variant of the ID as switchable tabs, dimensions and file size, the catalog fields in readable form (name, description, section, parent such as "Altitude Odin → Odin"), the raw JSON collapsed, and buttons to copy the path, copy the ID and show in folder.
 
@@ -106,17 +143,21 @@ The URL hash holds the current folder selection, query and open image, so a view
 
 ## Milestones
 
-1. **Skeleton.** Package, CLI, server, folder picker, presence shutdown (ported from `local-html-edit`). Opening a folder shows its subfolders and counts.
+1. **Skeleton.** Package, CLI, server, folder picker, presence shutdown (ported from `local-html-edit`), `.gitignore` for `.cache/`. Opens `content/` by default and shows its subfolders and counts.
 2. **Catalog and scan.** Catalog flattening, filename parsing, the ID join and the SQLite index, with tests on the sample content (all 74 sample images resolve to entries).
-3. **Grid browsing.** Folder selection, thumbnail generation and caching, paged infinite-scroll grid.
-4. **Search and filters.** FTS search, facets, language selector, sorting, URL state.
-5. **Detail panel.** Variants, metadata, parent/child links, copy and reveal actions, keyboard navigation.
-6. **Scale and hardening.** Test against the full dump (or a generated large fixture): first-run indexing time, incremental rebuild, thumbnail pre-generation, a missing-images report, and handling of non-PNG files and bad filenames.
+3. **Grid browsing.** Folder selection, background thumbnail generation and caching, paged infinite-scroll grid.
+4. **Search and filters.** FTS search (English, plus the all-languages toggle), facets, sorting, URL state.
+5. **Relationships and detail panel.** The `relations` table, inferred collections, weapon and collection filters, the detail panel with variants, metadata and the "Related" strip, copy and reveal actions, keyboard navigation.
+6. **Full dump and refresh.** Run against the real 11,000-file drop: first-run indexing and thumbnail time, incremental re-index, the refresh helper, "new in this drop", the missing-images report, and handling of non-PNG files and filenames that don't parse.
 
 ## Open questions
 
-1. **How big is the full dump?** Rough number of images and folders, and total size. This decides whether background thumbnail pre-generation is needed from day one.
-2. **Which folders and variants are coming?** Knowing the full list (for example `Characters`, `Skins`, `PlayerCards`, `Sprays`) lets us check that every naming pattern parses, and lets us give variants friendly labels.
-3. **Which languages matter for search?** Searching all 18 is cheap, but the display default and the language selector should match how the tool is used.
-4. **Should the full content live in the repo?** At this size it probably shouldn't: the tool takes the content folder's path, so the dump can sit anywhere on disk. The sample in `content/` stays as a test fixture, and `.gitignore` can exclude anything beyond it.
-5. **Is search on the metadata enough, or do people also need to find "all skins for weapon X" or "everything from act Y"?** Relationship filters (skin → weapon) are easy to add from the catalog; act/season links don't appear in the sample data.
+1. **Which folders and variants are in the full dump?** Needed to check that every filename parses, to give variants friendly labels, and to see whether chroma and level images (the bulk of the 11,000) are named by their own IDs.
+
+## Decisions
+
+- **Full dump size:** about 11,000 files, over 1 GB. Thumbnails are pre-generated in the background from the start.
+- **Language:** English is the primary language for display and search; other languages are an opt-in search toggle.
+- **Content location:** the full dump lives in the repo's `content/` and is replaced about monthly. Generated files stay out of git.
+- **Relationships:** in v1, including collections inferred from names.
+- **Stray root images:** the 13 images accidentally uploaded to the repo root were removed. They were map images (base, list-view and splash for 5 maps) and remain in git history; the full dump is expected to include them under `content/Maps`.
