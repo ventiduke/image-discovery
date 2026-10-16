@@ -2,7 +2,7 @@
 
 A local tool for browsing and searching the images in `content/`: pick folders, scroll through them as a grid, and search by the metadata in the catalog JSON. It only reads the content folder; it never changes it.
 
-See [docs/PLAN.md](docs/PLAN.md) for the full design.
+**New here? Start with [docs/OVERVIEW.md](docs/OVERVIEW.md)**: what the tool does, how to use it (in the browser and from an AI agent), how it works, and what's next. [docs/PLAN.md](docs/PLAN.md) has the original build plan and decisions.
 
 ## Status
 
