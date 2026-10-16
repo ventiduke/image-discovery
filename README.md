@@ -14,7 +14,7 @@ See [docs/PLAN.md](docs/PLAN.md) for the full design.
 | 4. Search, filters, colors, details panel | Done |
 | 5. Relationships (collections, "show all" links) | Partly done (details panel shows parents, contents and links) |
 | 6. Full dump and refresh | Not started |
-| Agent access (find, sheet, export, "good for") | Done; rules to be tuned on the real images |
+| Agent access (find, sheet, export, "good for") | Done; rules tuned on the full drop |
 
 ## Running it
 
@@ -40,7 +40,7 @@ A browser tab opens on the repo's `content` folder. Use **Change folder…** to 
 **Filter.** In the sidebar:
 
 - **Colors**: each image's main colors, worked out in the background after indexing. Click a swatch (the number is how many images have that color) to show images with at least 10% of it, best matches first. Pick several to need all of them.
-- **Good for**: what each image suits, worked out from its size, shape, transparency and amount of detail. **Slide background** (opaque, landscape, at least 1600 px wide, not too busy), **Section header** (a wide banner, or a big landscape image with a calm side for the title), **Icon / spot art** (transparent, squarish, subject filling the frame) and **Cut-out** (transparent and large). Hover one for its rule.
+- **Good for**: what each image suits, worked out from its size, shape, transparency and amount of detail. **Slide background** (opaque, landscape, at least 1600 px wide, not too busy), **Section header** (a wide banner such as a player card's wide variant, or a big landscape image with a calm side for the title), **Tall panel** (opaque and tall, such as a player card's large variant), **Icon / spot art** (transparent, squarish) and **Cut-out** (transparent and large). Hover one for its rule.
 - **Shape**: wide banner, landscape, square-ish or portrait.
 - **Kind** and **Variant**: the kind of catalog item (weapon skins › chromas, player cards, …) and the file variant.
 
@@ -77,7 +77,7 @@ uv run imagefind export Maps/<file>.png --out header.png --fit 1600x400   # copy
 uv run imagefind stats                               # how the images measure, per folder
 ```
 
-`find` and `sheet` take the same filters as the page: search words, `--use background|header|icon|cutout`, `--color` (by name, e.g. `red`, `"dark blue"`), `--shape`, `--folder`, `--kind`, `--variant`, `--min-width`, `--min-height`. Each result gives the full path, catalog name, size, main colors, what it's good for, and hints such as "best on dark backgrounds" (many icons are white silhouettes) or which side has room for a title. `export` copies an image out (never into the content folder), optionally resized to an exact size: `--mode cover` crops to fill, `--mode contain` pads with transparency.
+`find` and `sheet` take the same filters as the page: search words, `--use background|header|panel|icon|cutout`, `--color` (by name, e.g. `red`, `"dark blue"`), `--shape`, `--folder`, `--kind`, `--variant`, `--min-width`, `--min-height`. Each result gives the full path, catalog name, size, main colors, what it's good for, and hints such as "best on dark backgrounds" (many icons are white silhouettes) or which side has room for a title. `export` copies an image out (never into the content folder), optionally resized to an exact size: `--mode cover` crops to fill, `--mode contain` pads with transparency.
 
 The first command after a new content drop prepares every image (thumbnails, colors, measurements), which takes a minute or two; after that, commands take about a second.
 
@@ -89,7 +89,7 @@ uv run imagefind install-skill
 
 It goes to `~/.claude/skills/image-assets/`, with this folder's location filled in, so Claude Code can use the library from any project: ask it for "a section header image for the Ascent slide" and it searches, looks at a contact sheet, and exports the one it picks. Run it again after moving this folder or updating the tool.
 
-**Tuning.** The "good for" rules are first guesses. `uv run imagefind stats` prints how each folder measures and how many images each rule picks; the rules live in `imagefind/measure.py`.
+**Tuning.** The "good for" rules were tuned on the full drop (most images are small: half are 128 px or less, and only about 80 reach 1600 px). `uv run imagefind stats` prints how each folder measures and how many images each rule picks; the rules live in `imagefind/measure.py`.
 
 ## The content folder
 

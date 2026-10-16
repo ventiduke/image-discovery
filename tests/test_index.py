@@ -370,7 +370,8 @@ def test_uses_shapes_and_sizes(content, tmp_path):
         assert paths(conn, F("Maps", "Abilities", min_width=1700)) == ["Maps/M1.png"]
         assert paths(conn, F("Maps", "Abilities", min_height=500)) == ["Maps/M1.png"]
         facets = index.facets(conn, everything)
-        assert {u["use"]: u["count"] for u in facets["uses"]} == {"background": 1, "header": 2, "icon": 1, "cutout": 0}
+        assert {u["use"]: u["count"] for u in facets["uses"]} == \
+            {"background": 1, "header": 2, "panel": 0, "icon": 1, "cutout": 0}
         assert {s["shape"]: s["count"] for s in facets["shapes"]}["square"] >= 1
         assert facets["measured"] == 3
         m = index.measures_of(conn, "Abilities/C1_Ability1.png")

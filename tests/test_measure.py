@@ -46,6 +46,6 @@ def test_fully_transparent():
 
 
 def test_rules_are_named_and_described():
-    assert set(measure.USES) == {"background", "header", "icon", "cutout"}
+    assert set(measure.USES) == {"background", "header", "panel", "icon", "cutout"}
     assert all(label and desc and cond for label, desc, cond in measure.USES.values())
     assert set(measure.SHAPES) == {"banner", "landscape", "square", "portrait"}

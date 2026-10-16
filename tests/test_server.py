@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from imagefind import picker
+from imagefind import measure, picker
 from imagefind.presence import Presence
 from imagefind.server import create_app
 
@@ -191,7 +191,7 @@ def test_thumbnails_are_warmed_after_indexing(tmp_path):
     folders = {"folder": ["Maps", "Weapons"]}
     facets = c.get("/api/facets", params=folders).json()
     assert facets["colors_analyzed"] == facets["colors_total"] == 74
-    assert facets["measured"] == 74 and len(facets["uses"]) == 4
+    assert facets["measured"] == 74 and len(facets["uses"]) == len(measure.USES)
     assert sum(col["count"] for col in facets["colors"]) > 0
     # Opening the folder again finds nothing left to do.
     c.post("/api/open", json={"path": str(CONTENT)})

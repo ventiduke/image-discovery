@@ -13,8 +13,10 @@ small), alongside its colours:
   brightness: the best place for a title, and whether white or dark text
   will read there.
 
-The "good for" rules below are starting points, to be tuned on real images
-(``imagefind stats`` prints how a content folder measures).
+The "good for" rules below were tuned on the full content drop
+(``imagefind stats`` prints how a content folder measures). Most images there
+are small (median 128 px on the long side), so the rules accept banners and
+panels at their natural size; ``export`` warns when it has to enlarge one.
 """
 
 from __future__ import annotations
@@ -113,16 +115,23 @@ USES: dict[str, tuple[str, str, str]] = {
     ),
     "header": (
         "Section header",
-        "A wide banner (2.5:1 or wider, at least 1000 px), or a large opaque landscape "
-        "image with a calm side for the title, to crop into a strip.",
-        "m.transparent < 0.3 AND ((i.width >= 2.5 * i.height AND i.width >= 1000) OR "
+        "A wide banner (2.5:1 or wider, at least 400 px, such as a player card's wide variant), "
+        "or a large opaque landscape image with a calm side for the title, to crop into a strip.",
+        "m.transparent < 0.3 AND ((i.width >= 2.5 * i.height AND i.width >= 400) OR "
         "(i.width >= 1600 AND i.width >= 1.3 * i.height AND m.calm_busyness <= 0.10))",
+    ),
+    "panel": (
+        "Tall panel",
+        "Opaque and tall (at least 1.8 times as high as wide, 500 px high), such as a player card's "
+        "large variant: a side image beside text on a slide.",
+        "m.transparent < 0.02 AND i.height >= 1.8 * i.width AND i.height >= 500",
     ),
     "icon": (
         "Icon / spot art",
-        "Transparent background, roughly square, subject filling most of the frame, at least 128 px.",
+        "Transparent background, roughly square, subject filling at least a third of the frame "
+        "(buddies sit in padded frames), at least 128 px.",
         "m.transparent >= 0.15 AND i.width >= 0.75 * i.height AND i.width <= 1.34 * i.height "
-        "AND m.fill >= 0.5 AND i.width >= 128",
+        "AND m.fill >= 0.35 AND i.width >= 128",
     ),
     "cutout": (
         "Cut-out",

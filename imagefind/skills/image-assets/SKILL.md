@@ -39,14 +39,27 @@ uv run --project "{{REPO}}" imagefind <command> ...
 
    `export` prints JSON with the output path and size. If it says `"upscaled": true`, the image was enlarged and may look soft: prefer a larger source or a smaller `--fit`.
 
+## What the library holds
+
+Most images are small: half are 128 px or less on the long side, and only about 80 are 1600 px or more. So match the image to how big it will be shown:
+
+| Need | Where the good candidates are |
+| --- | --- |
+| Full-slide background | Map splash art (`--folder Maps --use background`), about 30 images at 1920×1080. There is little else that large. |
+| Section header | Player cards' wide variant, 452×128 (`--folder PlayerCards --variant wide`): sharp in an HTML report up to about 450 px wide; on a 1920 px slide it will be soft. Also map splashes cropped into a strip. |
+| Side image on a slide | Player cards' large variant, 268×640 (`--use panel`). |
+| Big cut-out subject | Character full portraits (`--folder Characters --use cutout`) and weapon skins. |
+| Icons | Abilities, weapons, game modes, roles: mostly **white silhouettes** that need a dark background. Buddies (Charms) and sprays have colour. |
+
 ## Filters (find and sheet)
 
 | Option | What it does |
 | --- | --- |
 | words | Every word must match, as a prefix, in the name, description, ID or a related item's name ("gekko" also finds his abilities, "vandal" every Vandal skin). |
 | `--use background` | Opaque, landscape (about 4:3 to 21:9), at least 1600 px wide, not too busy. For full-slide or hero backgrounds. |
-| `--use header` | A wide banner, or a large opaque landscape image with a calm side for the title, to crop into a strip. For section headers. |
-| `--use icon` | Transparent background, roughly square, subject filling the frame. For bullets, cards, small spot art. |
+| `--use header` | A wide banner (2.5:1 or wider, at least 400 px), or a large opaque landscape image with a calm side for the title, to crop into a strip. For section headers. |
+| `--use panel` | Opaque and tall (at least 1.8:1, 500 px high). A side image beside text on a slide. |
+| `--use icon` | Transparent background, roughly square, subject filling at least a third of the frame. For bullets, cards, small spot art. |
 | `--use cutout` | Transparent background, large. A subject to place on a slide. |
 | `--shape` | `banner` (2.5:1 or wider), `landscape`, `square`, `portrait`. |
 | `--color` | At least 10% of this colour; repeat to need several. Names: black, dark grey, light grey, white, and red, orange, yellow, lime, green, teal, cyan, sky, blue, purple, magenta, pink, each also "dark …" (dark orange is "brown", dark yellow "olive"). |

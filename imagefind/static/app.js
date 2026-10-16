@@ -579,7 +579,7 @@
   function suitability(d) {
     const m = d.measures;
     if (!m) return [el("h3", { textContent: "Good for" }), el("p", { className: "hint", textContent: "Not measured yet." })];
-    const labels = { background: "Slide background", header: "Section header", icon: "Icon / spot art", cutout: "Cut-out" };
+    const labels = { background: "Slide background", header: "Section header", panel: "Tall panel", icon: "Icon / spot art", cutout: "Cut-out" };
     const pctOf = (x) => `${Math.round(x * 100)}%`;
     const level = (x, low, high) => (x < low ? "low" : x > high ? "high" : "medium");
     const rows = [
@@ -597,7 +597,7 @@
         b.addEventListener("click", () => { state.uses = toggle(state.uses, u); filtersChanged(); renderDetail(d); });
         return b;
       }))
-      : el("p", { className: "hint", textContent: "None of the standard uses (background, header, icon, cut-out)." });
+      : el("p", { className: "hint", textContent: "None of the standard uses (background, header, tall panel, icon, cut-out)." });
     return [el("h3", { textContent: "Good for" }), chips,
       el("table", { className: "facts" }, el("tbody", {}, rows.map(([k, v]) =>
         el("tr", {}, el("th", { textContent: k }), el("td", { textContent: v })))))];
