@@ -1,0 +1,2 @@
+# Content drops are copied in as-is; never rewrite their line endings.
+content/** -text

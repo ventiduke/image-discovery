@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Image Discovery</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/keepalive.js" data-if-token="{{API_TOKEN}}"></script>
+</head>
+<body>
+<header class="topbar">
+  <h1>Image Discovery</h1>
+  <div class="content-path" id="content-path" title=""></div>
+  <button class="secondary" id="change" hidden>Change folder…</button>
+  <button class="link" id="exit" title="Stop the tool. It also stops by itself shortly after you close every tab.">Exit</button>
+</header>
+
+<div class="layout" id="layout" hidden>
+  <aside class="sidebar" aria-label="Folders">
+    <div class="sidebar-head">
+      <h2>Folders</h2>
+      <label class="all"><input type="checkbox" id="all"> All</label>
+    </div>
+    <ul class="folders" id="folders"></ul>
+  </aside>
+  <main class="main">
+    <section class="summary" id="summary"></section>
+    <ul class="warnings" id="warnings"></ul>
+    <section class="selection" id="selection"></section>
+  </main>
+</div>
+
+<div class="open-panel" id="open-panel" hidden>
+  <div class="card">
+    <h2>Choose a content folder</h2>
+    <p>The folder with the catalog JSON file and the image folders, for example the repo's <code>content</code> folder.</p>
+    <button class="primary" id="pick">Choose folder…</button>
+    <div class="or">or paste the folder's path</div>
+    <form id="open-form">
+      <input id="path" placeholder="C:\image-discovery\content" autocomplete="off" spellcheck="false" aria-label="Folder path">
+      <button class="secondary" type="submit">Open</button>
+    </form>
+    <div id="waiting" hidden role="status">
+      A folder dialog has opened. Can't see it? It may be behind other windows (check the taskbar),
+      or close it and paste the folder's path above instead.
+      <div><button class="secondary" id="cancel-pick">Close the dialog</button></div>
+    </div>
+    <div id="msg" role="status"></div>
+    <div class="card-foot"><button class="link" id="close-panel" hidden>Cancel</button></div>
+  </div>
+</div>
+
+<div class="stopped" id="stopped" hidden>
+  <div class="card">
+    <h2>Image Discovery has stopped</h2>
+    <p>You can close this tab. Run <code>uv run imagefind</code> to start it again.</p>
+  </div>
+</div>
+
+<script>window.IF_TOKEN = "{{API_TOKEN}}";</script>
+<script src="/static/app.js"></script>
+</body>
+</html>

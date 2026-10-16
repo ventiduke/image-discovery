@@ -2,6 +2,8 @@
 
 Oct 16, 2026
 
+**Progress:** milestone 1 (skeleton) is built.
+
 ## Goal and scope
 
 Build a local tool that points at a content folder (one catalog JSON plus sub-folders of images), and makes those images easy to find: browse a folder as a scrolling grid, and search across every image by its catalog metadata.
