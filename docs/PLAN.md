@@ -2,7 +2,7 @@
 
 Oct 16, 2026
 
-**Progress:** milestone 1 (skeleton) is built.
+**Progress:** milestones 1 (skeleton) and 2 (catalog and scan) are built. Against a synthetic dump of 10,453 files with the real catalog, the first index takes about 3 seconds and later ones about 0.2 seconds.
 
 ## Goal and scope
 

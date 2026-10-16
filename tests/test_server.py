@@ -18,8 +18,9 @@ def picked():
 
 
 @pytest.fixture
-def client(picked):
-    app = create_app(allowed_hosts={HOST}, api_token=TOKEN, pick=lambda _: picked["path"])
+def client(picked, tmp_path):
+    app = create_app(allowed_hosts={HOST}, api_token=TOKEN, pick=lambda _: picked["path"],
+                     cache_for=lambda root: tmp_path / "cache")
     return TestClient(app, headers={"X-IF-Token": TOKEN})
 
 
@@ -67,6 +68,39 @@ def test_open_lists_folders(client):
     assert client.get("/api/library").json()["library"] == lib
 
 
+def test_open_indexes_in_the_background(client):
+    assert client.get("/api/status").json() == {"state": "none"}
+    client.post("/api/open", json={"path": str(CONTENT)})
+    status = client.app.state.session.wait()
+    assert status["state"] == "ready"
+    assert client.get("/api/status").json() == status
+    report = status["report"]
+    assert report["images"] == report["matched"] > 0
+    assert {f["name"] for f in report["folders"]} == {"Maps", "Weapons"}
+
+
+def test_indexing_error_is_reported(client, tmp_path):
+    root = tmp_path / "content"
+    (root / "Maps").mkdir(parents=True)
+    (root / "Maps" / "a.png").write_bytes(b"")
+    (root / "PublicContentCatalog.json").write_text("{broken")
+    client.post("/api/open", json={"path": str(root)})
+    status = client.app.state.session.wait()
+    assert status["state"] == "error"
+    assert "PublicContentCatalog.json" in status["error"]
+
+
+def test_reopening_drops_the_older_build(client, tmp_path):
+    other = tmp_path / "other"
+    (other / "Maps").mkdir(parents=True)
+    (other / "Maps" / "x.png").write_bytes(b"")
+    session = client.app.state.session
+    client.post("/api/open", json={"path": str(CONTENT)})
+    client.post("/api/open", json={"path": str(other)})
+    status = session.wait()
+    assert status["state"] == "ready" and status["report"]["images"] == 1
+
+
 def test_open_rejects_bad_path(client):
     res = client.post("/api/open", json={"path": str(CONTENT / "nope")})
     assert res.status_code == 400
@@ -89,9 +123,10 @@ def test_pick_without_dialog():
     assert res.json()["noDialog"] is True
 
 
-def test_pick_starts_in_the_open_folder(picked):
+def test_pick_starts_in_the_open_folder(picked, tmp_path):
     seen = []
-    app = create_app(allowed_hosts={HOST}, api_token=TOKEN, pick=lambda d: seen.append(d))
+    app = create_app(allowed_hosts={HOST}, api_token=TOKEN, pick=lambda d: seen.append(d),
+                     cache_for=lambda root: tmp_path)
     c = TestClient(app, headers={"X-IF-Token": TOKEN})
     c.post("/api/pick")
     c.post("/api/open", json={"path": str(CONTENT)})

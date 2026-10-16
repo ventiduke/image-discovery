@@ -1,13 +1,17 @@
-// Image Discovery page: content folder picker and folder list.
+// Image Discovery page: content folder picker, folder list and match report.
 (() => {
   "use strict";
   const TOKEN = window.IF_TOKEN;
   const $ = (id) => document.getElementById(id);
   const fmt = (n) => n.toLocaleString("en-US");
   const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
+  // Rounded down, so 5 unmatched files out of 10,000 reads 99.9%, not 100%.
+  const pct = (part, whole) => (whole ? `${Math.floor((1000 * part) / whole) / 10}%` : "–");
 
   let library = null;
+  let status = { state: "none" };
   let selected = new Set(); // folder names; kept in the URL hash
+  let polling = null;
 
   async function api(path, body) {
     const res = await fetch(path, {
@@ -16,6 +20,22 @@
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     return res.json();
+  }
+
+  // Small DOM builder: el("td", { className: "num" }, "12", childNode, ...)
+  function el(tag, props, ...children) {
+    const node = Object.assign(document.createElement(tag), props || {});
+    for (const child of children.flat()) {
+      if (child !== null && child !== undefined && child !== false) node.append(child);
+    }
+    return node;
+  }
+
+  // "weaponSkins.chromas" -> "Weapon skins › chromas"
+  function kindLabel(kind) {
+    const words = (s) => s.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+    const label = kind.split(".").map(words).join(" › ");
+    return label.charAt(0).toUpperCase() + label.slice(1);
   }
 
   // -- URL state ------------------------------------------------------------
@@ -38,14 +58,11 @@
 
   // -- rendering -----------------------------------------------------------
 
-  function stat(label, value, small) {
-    const el = document.createElement("div");
-    el.className = "stat";
-    el.innerHTML = '<div class="label"></div><div class="value"></div>';
-    el.firstChild.textContent = label;
-    el.lastChild.textContent = value;
-    if (small) el.lastChild.classList.add("small");
-    return el;
+  function stat(label, value, detail, small) {
+    return el("div", { className: "stat" },
+      el("div", { className: "label", textContent: label }),
+      el("div", { className: small ? "value small" : "value", textContent: value }),
+      detail ? el("div", { className: "detail", textContent: detail }) : null);
   }
 
   function render() {
@@ -57,37 +74,64 @@
     $("content-path").title = library ? library.path : "";
     if (!library) return;
 
-    const summary = $("summary");
-    summary.replaceChildren(
-      stat("Images", fmt(library.images)),
-      stat("Folders", fmt(library.folders.length)),
-      stat("Catalog", library.catalog || "None", true),
-      stat("Catalog version", library.version || "Unknown", true),
-    );
-
-    $("warnings").replaceChildren(...library.warnings.map((text) => {
-      const li = document.createElement("li");
-      li.textContent = text;
-      return li;
-    }));
+    renderSummary();
+    $("warnings").replaceChildren(...library.warnings.map((text) => el("li", { textContent: text })));
 
     const list = $("folders");
     list.replaceChildren(...library.folders.map((folder) => {
-      const li = document.createElement("li");
-      if (!folder.images) li.className = "empty";
-      li.innerHTML = '<label><input type="checkbox"><span class="name"></span><span class="count"></span></label>';
-      const box = li.querySelector("input");
-      box.checked = selected.has(folder.name);
+      const box = el("input", { type: "checkbox", checked: selected.has(folder.name) });
       box.addEventListener("change", () => {
         if (box.checked) selected.add(folder.name); else selected.delete(folder.name);
         writeHash();
         renderSelection();
       });
-      li.querySelector(".name").textContent = folder.name;
-      li.querySelector(".count").textContent = fmt(folder.images);
-      return li;
+      return el("li", { className: folder.images ? "" : "empty" },
+        el("label", {}, box,
+          el("span", { className: "name", textContent: folder.name }),
+          el("span", { className: "count", textContent: fmt(folder.images) })));
     }));
+    renderStatus();
     renderSelection();
+    renderCoverage();
+    renderUnmatched();
+  }
+
+  function renderSummary() {
+    const report = status.state === "ready" ? status.report : null;
+    const cards = [
+      stat("Images", fmt(library.images), plural(library.folders.length, "folder")),
+      report
+        ? stat("Matched to catalog", pct(report.matched, report.images),
+          `${fmt(report.matched)} of ${fmt(report.images)} images`)
+        : stat("Matched to catalog", "…", status.state === "error" ? "Indexing failed" : "Indexing"),
+      report
+        ? stat("Catalog entries with images", fmt(report.entries_with_images),
+          `of ${fmt(report.entries)} entries`)
+        : null,
+      stat("Catalog", library.version || "No version", library.catalog || "No catalog file", true),
+    ];
+    $("summary").replaceChildren(...cards.filter(Boolean));
+  }
+
+  function renderStatus() {
+    const box = $("status");
+    if (status.state === "indexing") {
+      const total = status.total || 0;
+      const done = Math.min(status.done || 0, total);
+      box.hidden = false;
+      box.className = "panel";
+      box.replaceChildren(
+        el("h2", { textContent: "Indexing…" }),
+        el("p", { textContent: done ? `${fmt(done)} of ${fmt(total)} images` : "Reading the catalog…" }),
+        el("progress", { max: total || 1, value: done }));
+    } else if (status.state === "error") {
+      box.hidden = false;
+      box.className = "panel error";
+      box.replaceChildren(el("h2", { textContent: "Couldn't index this folder" }),
+        el("p", { textContent: status.error }));
+    } else {
+      box.hidden = true;
+    }
   }
 
   function renderSelection() {
@@ -97,18 +141,97 @@
     all.checked = chosen.length === library.folders.length && chosen.length > 0;
     all.indeterminate = chosen.length > 0 && !all.checked;
 
-    const box = $("selection");
-    box.replaceChildren();
-    const h = document.createElement("h2");
-    const p = document.createElement("p");
+    const box = $("folder-report");
     if (!chosen.length) {
-      h.textContent = "No folders selected";
-      p.textContent = "Tick one or more folders on the left.";
-    } else {
-      h.textContent = `${plural(images, "image")} in ${plural(chosen.length, "folder")}`;
-      p.textContent = "The image grid and search are the next milestones; this page lists what was found.";
+      box.replaceChildren(el("h2", { textContent: "No folders selected" }),
+        el("p", { textContent: "Tick one or more folders on the left." }));
+      return;
     }
-    box.append(h, p);
+    const heading = el("h2", { textContent: `${plural(images, "image")} in ${plural(chosen.length, "folder")}` });
+    if (status.state !== "ready") {
+      box.replaceChildren(heading, el("p", { textContent: "The match report appears once indexing finishes." }));
+      return;
+    }
+    const byName = new Map(status.report.folders.map((f) => [f.name, f]));
+    const rows = chosen.map((folder) => byName.get(folder.name) ||
+      { name: folder.name, images: 0, matched: 0, unmatched: 0, variants: {}, kinds: {} });
+    const total = rows.reduce((t, r) => ({ images: t.images + r.images, matched: t.matched + r.matched }),
+      { images: 0, matched: 0 });
+    const chips = (counts, label) => el("div", { className: "chips" },
+      Object.entries(counts).map(([k, n]) =>
+        el("span", { className: "chip" }, label(k), el("span", { className: "num", textContent: ` ${fmt(n)}` }))));
+
+    box.replaceChildren(heading,
+      el("p", { textContent: "How each folder's files match the catalog. The image grid and search come next." }),
+      el("div", { className: "table-wrap" }, el("table", {},
+        el("thead", {}, el("tr", {},
+          el("th", { textContent: "Folder" }),
+          el("th", { className: "num", textContent: "Images" }),
+          el("th", { className: "num", textContent: "Matched" }),
+          el("th", { className: "num", textContent: "Unmatched" }),
+          el("th", { textContent: "Variants" }),
+          el("th", { textContent: "Catalog kind" }))),
+        el("tbody", {}, rows.map((r) => el("tr", {},
+          el("td", { textContent: r.name }),
+          el("td", { className: "num", textContent: fmt(r.images) }),
+          el("td", { className: "num", textContent: fmt(r.matched) }),
+          el("td", { className: r.unmatched ? "num bad" : "num", textContent: fmt(r.unmatched) }),
+          el("td", {}, chips(r.variants, (v) => v)),
+          el("td", {}, chips(r.kinds, kindLabel))))),
+        rows.length > 1
+          ? el("tfoot", {}, el("tr", {},
+            el("td", { textContent: "Total" }),
+            el("td", { className: "num", textContent: fmt(total.images) }),
+            el("td", { className: "num", textContent: fmt(total.matched) }),
+            el("td", { className: "num", textContent: fmt(total.images - total.matched) }),
+            el("td"), el("td")))
+          : null)));
+  }
+
+  function renderCoverage() {
+    const box = $("coverage");
+    box.hidden = status.state !== "ready" || !status.report.coverage.length;
+    if (box.hidden) return;
+    box.replaceChildren(
+      el("h2", { textContent: "Catalog coverage" }),
+      el("p", { textContent: "How many entries of each kind in the catalog have at least one image." }),
+      el("div", { className: "table-wrap" }, el("table", {},
+        el("thead", {}, el("tr", {},
+          el("th", { textContent: "Catalog kind" }),
+          el("th", { className: "num", textContent: "Entries" }),
+          el("th", { className: "num", textContent: "With images" }),
+          el("th", { className: "bar-col", textContent: "" }))),
+        el("tbody", {}, status.report.coverage.map((c) => {
+          const bar = el("div", { className: "bar" }, el("div", { className: "fill" }));
+          bar.firstChild.style.width = c.entries ? `${(100 * c.with_images) / c.entries}%` : "0";
+          return el("tr", {},
+            el("td", { textContent: kindLabel(c.kind) }),
+            el("td", { className: "num", textContent: fmt(c.entries) }),
+            el("td", { className: "num", textContent: `${fmt(c.with_images)} (${pct(c.with_images, c.entries)})` }),
+            el("td", { className: "bar-col" }, bar));
+        })))));
+  }
+
+  function renderUnmatched() {
+    const box = $("unmatched");
+    const report = status.state === "ready" ? status.report : null;
+    box.hidden = !report || !report.unmatched_total;
+    if (box.hidden) return;
+    const more = report.unmatched_total - report.unmatched.length;
+    box.replaceChildren(el("details", {},
+      el("summary", {}, el("h2", { textContent: `${plural(report.unmatched_total, "file")} match no catalog entry` })),
+      el("p", { textContent: "Their names aren't a catalog ID or label, so they'll have no metadata." }),
+      el("ul", { className: "paths" }, report.unmatched.map((p) => el("li", {}, el("code", { textContent: p })))),
+      more > 0 ? el("p", { textContent: `… and ${fmt(more)} more. Run uv run imagefind --report for the full list.` }) : null));
+  }
+
+  // -- index status -------------------------------------------------------------
+
+  async function refreshStatus() {
+    try { status = await api("/api/status"); } catch (e) { return; }
+    if (library) render();
+    clearTimeout(polling);
+    if (status.state === "indexing") polling = setTimeout(refreshStatus, 400);
   }
 
   // -- open panel -----------------------------------------------------------
@@ -126,8 +249,10 @@
       library = result.library;
       if (changed) history.replaceState(null, "", location.pathname);
       selected = readHash();
+      status = { state: "indexing", done: 0, total: library.images };
       showPanel(false);
       render();
+      refreshStatus();
       return;
     }
     if (result.cancelled) { $("msg").textContent = ""; return; }
@@ -176,6 +301,7 @@
   });
 
   $("exit").addEventListener("click", async () => {
+    clearTimeout(polling);
     try { await api("/api/shutdown", {}); } catch (e) {}
     if (window.__ifKeepalive) window.__ifKeepalive.stop();
     $("open-panel").hidden = true;
@@ -188,7 +314,10 @@
   api("/api/library")
     .then((result) => {
       library = result.library;
-      if (library) { selected = readHash(); render(); } else { showPanel(true); }
+      if (!library) { showPanel(true); return; }
+      selected = readHash();
+      render();
+      refreshStatus();
     })
     .catch(() => { showPanel(true); unreachable(); });
 })();

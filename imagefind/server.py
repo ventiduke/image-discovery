@@ -5,6 +5,7 @@ from __future__ import annotations
 import mimetypes
 import secrets
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -12,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import picker
+from . import index, picker
 from .library import Library, LibraryError, open_library
 from .presence import Presence
 
@@ -37,17 +38,64 @@ class PresenceRequest(BaseModel):
 
 
 class Session:
-    """The content folder open in this run of the server."""
+    """The content folder open in this run of the server, and its index.
 
-    def __init__(self) -> None:
+    Opening a folder returns at once; the index is built on a background
+    thread and :attr:`status` reports its progress. Opening another folder
+    while one is indexing lets that build finish, but its result is dropped.
+    """
+
+    def __init__(self, cache_for: Callable[[Path], Path] = index.cache_dir) -> None:
+        self.cache_for = cache_for
         self.library: Library | None = None
+        self.status: dict = {"state": "none"}
+        self.db_path: Path | None = None
+        self._generation = 0
         self._lock = threading.Lock()
+        self._build_lock = threading.Lock()  # one build at a time
 
-    def open(self, raw_path: str | Path) -> Library:
+    def open(self, raw_path: str | Path, rebuild: bool = False) -> Library:
         library = open_library(raw_path)
         with self._lock:
+            self._generation += 1
+            generation = self._generation
             self.library = library
+            self.db_path = None
+            self.status = {"state": "indexing", "done": 0, "total": library.images}
+        threading.Thread(
+            target=self._index, args=(library, generation, rebuild), daemon=True
+        ).start()
         return library
+
+    def wait(self, timeout: float = 30) -> dict:
+        """Block until the current build finishes (for tests and the CLI)."""
+        deadline = time.monotonic() + timeout
+        while self.status["state"] == "indexing" and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return self.status
+
+    def _index(self, library: Library, generation: int, rebuild: bool) -> None:
+        db_path = self.cache_for(library.root) / "index.sqlite"
+
+        def progress(done: int, total: int) -> None:
+            self._publish(generation, {"state": "indexing", "done": done, "total": total})
+
+        try:
+            with self._build_lock:
+                result = index.build(library, db_path, rebuild=rebuild, progress=progress)
+                report = index.report(db_path)
+        except Exception as exc:
+            self._publish(generation, {"state": "error", "error": f"Indexing failed: {exc}"})
+            return
+        with self._lock:
+            if generation == self._generation:
+                self.db_path = db_path
+                self.status = {"state": "ready", "seconds": result.seconds, "report": report}
+
+    def _publish(self, generation: int, status: dict) -> None:
+        with self._lock:
+            if generation == self._generation:
+                self.status = status
 
 
 def create_app(
@@ -58,9 +106,10 @@ def create_app(
     cancel_pick: Callable[[], bool] | None = None,
     on_exit: Callable[[], None] = lambda: None,
     presence: Presence | None = None,
+    cache_for: Callable[[Path], Path] = index.cache_dir,
 ) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    session = Session()
+    session = Session(cache_for)
     if pick is None:
         dialog = picker.Picker()
         pick, cancel_pick = dialog.pick, dialog.cancel
@@ -109,6 +158,10 @@ def create_app(
     def api_library():
         library = session.library
         return {"library": library.summary() if library else None}
+
+    @app.get("/api/status")
+    def api_status():
+        return session.status
 
     @app.post("/api/open")
     def api_open(body: OpenRequest):
