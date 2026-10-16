@@ -12,11 +12,12 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from PIL import Image
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import index, picker, thumbs
+from . import colors, index, picker, thumbs
 from .library import Library, LibraryError, open_library
 from .presence import Presence
 
@@ -129,15 +130,56 @@ class Session:
                 warmer.stop()
 
     def _start_warmer(self, ready: Ready) -> thumbs.Warmer:
+        """Make missing thumbnails and work out colours, in the background.
+
+        Colours are read from the thumbnail (or the image itself when it's
+        small), so each large image is decoded only once. Results are written
+        to the index in batches.
+        """
         with closing(index.connect(ready.db_path)) as conn:
             rows = index.all_images(conn)
-        jobs = [
-            (ready.root / row["path"],
-             thumbs.thumb_path(ready.thumbs_dir, row["path"], row["size"], row["mtime_ns"]))
-            for row in rows if thumbs.needs_thumbnail(row["width"], row["height"])
-        ]
-        jobs = [job for job in jobs if not job[1].exists()]
-        return thumbs.Warmer(jobs, total=len(jobs))
+        jobs = []
+        for row in rows:
+            target = None
+            if thumbs.needs_thumbnail(row["width"], row["height"]):
+                target = thumbs.thumb_path(ready.thumbs_dir, row["path"], row["size"], row["mtime_ns"])
+            missing = target is not None and not target.exists()
+            if missing or not row["analyzed"]:
+                jobs.append((row["path"], ready.root / row["path"], target, bool(row["analyzed"])))
+
+        pending: list[tuple[str, dict]] = []
+        lock = threading.Lock()
+        conn = index.connect(ready.db_path)
+
+        def flush(final: bool = False) -> None:
+            with lock:
+                batch = pending[:]
+                pending.clear()
+                if batch:
+                    index.save_colors(conn, batch)
+                if final:
+                    conn.close()
+
+        def process(job) -> None:
+            path, source, target, analyzed = job
+            im = None
+            if target is not None and not target.exists():
+                im = thumbs.shrink(source)
+                thumbs.save(im, target)
+            if analyzed:
+                return
+            if im is None:
+                with Image.open(target if target is not None else source) as opened:
+                    shares = colors.analyze(opened)
+            else:
+                shares = colors.analyze(im)
+            with lock:
+                pending.append((path, shares))
+                full = len(pending) >= 200
+            if full:
+                flush()
+
+        return thumbs.Warmer(jobs, total=len(jobs), process=process, on_finish=lambda: flush(final=True))
 
     def _publish(self, generation: int, status: dict) -> None:
         with self._lock:
@@ -167,6 +209,11 @@ def create_app(
     app.state.session = session
     app.state.api_token = api_token
     app.state.presence = presence
+
+    @app.exception_handler(HTTPException)
+    async def http_error(request: Request, exc: HTTPException):
+        # The page reads {"error": ...} from every failed API call.
+        return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -211,25 +258,71 @@ def create_app(
     def api_status():
         return session.current_status()
 
+    def filters(
+        folder: list[str] = Query(default=[]),
+        q: str = "",
+        langs: bool = False,
+        tag: list[str] = Query(default=[]),
+        color: list[int] = Query(default=[]),
+        kind: list[str] = Query(default=[]),
+        variant: list[str] = Query(default=[]),
+    ) -> index.Filters:
+        return index.Filters(folder, q, langs, tag, color, kind, variant)
+
+    def _ready_or_409() -> Ready:
+        ready = session.ready
+        if ready is None:
+            raise HTTPException(409, "The folder is still being indexed.")
+        return ready
+
     @app.get("/api/images")
     def api_images(
-        folder: list[str] = Query(default=[]),
+        f: index.Filters = Depends(filters),
         sort: str = "name",
         offset: int = Query(default=0, ge=0),
         limit: int = Query(default=200, ge=1, le=1000),
     ):
-        ready = session.ready
-        if ready is None:
-            return JSONResponse({"error": "The folder is still being indexed."}, status_code=409)
+        ready = _ready_or_409()
         with closing(index.connect(ready.db_path)) as conn:
-            total, rows = index.list_images(conn, folder, sort, offset, limit)
+            total, rows = index.list_images(conn, f, sort, offset, limit)
         for row in rows:
-            version = f"{row.pop('size')}-{row.pop('mtime_ns')}"
-            url = quote(row["path"])
-            row["thumb"] = f"/thumb/{url}?v={version}"
-            row["file"] = f"/file/{url}?v={version}"
+            _add_urls(row)
             row["name"] = row["name"] or row["stem"]
         return {"total": total, "offset": offset, "images": rows}
+
+    @app.get("/api/facets")
+    def api_facets(f: index.Filters = Depends(filters), min_refs: int = Query(default=3, ge=1)):
+        ready = _ready_or_409()
+        with closing(index.connect(ready.db_path)) as conn:
+            return index.facets(conn, f, min_refs=min_refs)
+
+    @app.get("/api/image")
+    def api_image(path: str):
+        ready = _ready_or_409()
+        with closing(index.connect(ready.db_path)) as conn:
+            detail = index.image_detail(conn, path)
+        if detail is None:
+            raise HTTPException(404, "No such image.")
+        _add_urls(detail["image"])
+        for item in [detail.get("parent"), *detail.get("references", []), *detail.get("children", []),
+                     *detail.get("referenced_by", [])]:
+            if item and item.get("image"):
+                _add_urls(item["image"])
+        for variant in detail.get("variants", []):
+            _add_urls(variant)
+        return detail
+
+    @app.get("/api/catalog")
+    def api_catalog():
+        ready = _ready_or_409()
+        with closing(index.connect(ready.db_path)) as conn:
+            return {"kinds": index.catalog_overview(conn)}
+
+    def _add_urls(row: dict) -> None:
+        version = f"{row.pop('size')}-{row.pop('mtime_ns')}"
+        url = quote(row["path"])
+        row["thumb"] = f"/thumb/{url}?v={version}"
+        row["file"] = f"/file/{url}?v={version}"
 
     # -- images ---------------------------------------------------------------
 

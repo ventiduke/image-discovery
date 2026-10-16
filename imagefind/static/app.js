@@ -1,24 +1,31 @@
-// Image Discovery page: content folder picker, folder list, image grid and match report.
+// Image Discovery page: folder picker, filters, image grid, details panel and match report.
 (() => {
   "use strict";
   const TOKEN = window.IF_TOKEN;
   const PAGE = 200; // images per request
+  const TAGS_SHOWN = 60; // tags listed before "Show all"
   const $ = (id) => document.getElementById(id);
   const fmt = (n) => n.toLocaleString("en-US");
   const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
   // Rounded down, so 5 unmatched files out of 10,000 reads 99.9%, not 100%.
   const pct = (part, whole) => (whole ? `${Math.floor((1000 * part) / whole) / 10}%` : "–");
+  const bytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 
   let library = null;
   let status = { state: "none" };
-  // Kept in the URL hash, so a view can be bookmarked or reloaded.
-  let selected = new Set(); // folder names
-  let view = "images"; // or "report"
-  let sort = "name";
   let polling = null;
-  // The grid: images loaded so far for the current folders and sort.
-  // `run` counts restarts, so a page that arrives after a restart is dropped.
-  const grid = { key: "", run: 0, loaded: 0, total: null, loading: false };
+  // What's shown; kept in the URL hash so a view can be bookmarked or reloaded.
+  const state = {
+    folders: new Set(), view: "images", sort: "name",
+    q: "", langs: false, tags: [], colors: [], kinds: [], variants: [],
+  };
+  // The grid: images loaded so far. `run` counts restarts, so a page that
+  // arrives after a restart is dropped.
+  const grid = { key: "", run: 0, loaded: 0, total: null, loading: false, items: [] };
+  let facets = null;
+  let tagNames = {}; // tag -> display name, for the active-filter chips
+  let showAllTags = false;
+  let current = -1; // index into grid.items of the image in the details panel
 
   async function api(path, body) {
     const res = await fetch(path, {
@@ -51,32 +58,72 @@
     set(key, value) { try { localStorage.setItem(`imagefind.${key}`, value); } catch (e) { /* ignore */ } },
   };
 
+  function toast(text) {
+    const t = el("div", { className: "toast", textContent: text, role: "status" });
+    document.body.append(t);
+    setTimeout(() => t.remove(), 1600);
+  }
+
+  function debounce(fn, ms) {
+    let t;
+    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  }
+
   // -- URL state ------------------------------------------------------------
 
   function readHash() {
-    const params = new URLSearchParams(location.hash.slice(1));
+    const p = new URLSearchParams(location.hash.slice(1));
     const names = library ? library.folders.map((f) => f.name) : [];
-    if (params.has("folders")) {
-      const wanted = params.get("folders").split(",").filter(Boolean);
-      selected = new Set(wanted.filter((n) => names.includes(n)));
-    } else {
-      selected = new Set(names);
-    }
-    view = params.get("view") === "report" ? "report" : "images";
-    sort = ["name", "folder", "size"].includes(params.get("sort")) ? params.get("sort") : "name";
+    const list = (key) => (p.get(key) || "").split(",").filter(Boolean);
+    state.folders = new Set(p.has("folders") ? list("folders").filter((n) => names.includes(n)) : names);
+    state.view = p.get("view") === "report" ? "report" : "images";
+    state.sort = ["name", "folder", "size"].includes(p.get("sort")) ? p.get("sort") : "name";
+    state.q = p.get("q") || "";
+    state.langs = p.get("langs") === "1";
+    state.tags = list("tags");
+    state.colors = list("colors").map(Number).filter((n) => Number.isInteger(n));
+    state.kinds = list("kinds");
+    state.variants = list("variants");
   }
 
   function writeHash() {
-    const all = library.folders.every((f) => selected.has(f.name));
-    const params = new URLSearchParams();
-    if (!all) params.set("folders", [...selected].join(","));
-    if (view !== "images") params.set("view", view);
-    if (sort !== "name") params.set("sort", sort);
-    const hash = params.toString();
+    const p = new URLSearchParams();
+    if (!library.folders.every((f) => state.folders.has(f.name))) p.set("folders", [...state.folders].join(","));
+    if (state.view !== "images") p.set("view", state.view);
+    if (state.sort !== "name") p.set("sort", state.sort);
+    if (state.q) p.set("q", state.q);
+    if (state.langs) p.set("langs", "1");
+    for (const key of ["tags", "colors", "kinds", "variants"]) {
+      if (state[key].length) p.set(key, state[key].join(","));
+    }
+    const hash = p.toString();
     history.replaceState(null, "", hash ? `#${hash}` : location.pathname);
   }
 
-  // -- rendering -----------------------------------------------------------
+  // Query string for /api/images and /api/facets.
+  function filterParams() {
+    const p = new URLSearchParams();
+    for (const name of library.folders.map((f) => f.name)) if (state.folders.has(name)) p.append("folder", name);
+    if (state.q) p.set("q", state.q);
+    if (state.langs) p.set("langs", "true");
+    for (const t of state.tags) p.append("tag", t);
+    for (const c of state.colors) p.append("color", c);
+    for (const k of state.kinds) p.append("kind", k);
+    for (const v of state.variants) p.append("variant", v);
+    return p;
+  }
+
+  // Something that changes which images match: save it, then refresh.
+  function filtersChanged() {
+    writeHash();
+    updateAllBox();
+    renderActiveFilters();
+    renderReport();
+    loadGrid();
+    loadFacets();
+  }
+
+  // -- page layout --------------------------------------------------------------
 
   function stat(label, value, detail, small) {
     return el("div", { className: "stat" },
@@ -95,32 +142,29 @@
     if (!library) return;
 
     $("warnings").replaceChildren(...library.warnings.map((text) => el("li", { textContent: text })));
-    const list = $("folders");
-    list.replaceChildren(...library.folders.map((folder) => {
-      const box = el("input", { type: "checkbox", checked: selected.has(folder.name) });
+    $("folders").replaceChildren(...library.folders.map((folder) => {
+      const box = el("input", { type: "checkbox", checked: state.folders.has(folder.name) });
       box.addEventListener("change", () => {
-        if (box.checked) selected.add(folder.name); else selected.delete(folder.name);
-        selectionChanged();
+        if (box.checked) state.folders.add(folder.name); else state.folders.delete(folder.name);
+        filtersChanged();
       });
       return el("li", { className: folder.images ? "" : "empty" },
         el("label", {}, box,
           el("span", { className: "name", textContent: folder.name }),
           el("span", { className: "count", textContent: fmt(folder.images) })));
     }));
+    $("search").value = state.q;
+    $("langs").checked = state.langs;
+    updateAllBox();
     renderView();
     renderStatus();
+    renderActiveFilters();
+    renderFacets();
     renderReport();
-  }
-
-  function selectionChanged() {
-    writeHash();
-    updateAllBox();
-    renderReport();
-    loadGrid();
   }
 
   function updateAllBox() {
-    const n = library.folders.filter((f) => selected.has(f.name)).length;
+    const n = library.folders.filter((f) => state.folders.has(f.name)).length;
     const all = $("all");
     all.checked = n === library.folders.length && n > 0;
     all.indeterminate = n > 0 && !all.checked;
@@ -128,18 +172,19 @@
 
   function renderView() {
     for (const name of ["images", "report"]) {
-      $(`tab-${name}`).setAttribute("aria-selected", String(view === name));
-      $(`view-${name}`).hidden = view !== name;
+      $(`tab-${name}`).setAttribute("aria-selected", String(state.view === name));
+      $(`view-${name}`).hidden = state.view !== name;
     }
-    $("grid-controls").hidden = view !== "images";
-    $("sort").value = sort;
+    $("grid-controls").hidden = state.view !== "images";
+    $("search-box").hidden = state.view !== "images";
+    $("sort").value = state.sort;
     renderCount();
   }
 
   function renderCount() {
     const box = $("result-count");
-    if (view !== "images") { box.textContent = ""; return; }
-    if (!selected.size) { box.textContent = "No folders selected"; return; }
+    if (state.view !== "images") { box.textContent = ""; return; }
+    if (!state.folders.size) { box.textContent = "No folders selected"; return; }
     box.textContent = grid.total === null ? "" : plural(grid.total, "image");
   }
 
@@ -162,37 +207,161 @@
     } else {
       box.hidden = true;
     }
-    const thumbs = status.thumbs;
+    const work = status.thumbs;
     const progress = $("thumbs-progress");
-    progress.hidden = !(thumbs && thumbs.running);
+    progress.hidden = !(work && work.running);
     if (!progress.hidden) {
-      progress.textContent = `Preparing thumbnails in the background: ${fmt(thumbs.done)} of ${fmt(thumbs.total)}. ` +
-        "The grid works meanwhile; images not ready yet take a moment to appear.";
+      progress.textContent = `Preparing thumbnails and colors in the background: ${fmt(work.done)} of ${fmt(work.total)}. ` +
+        "Browsing works meanwhile; the color filter covers more images as this goes on.";
     }
+  }
+
+  // -- active filters -------------------------------------------------------------
+
+  function colorBin(id) {
+    return facets ? facets.colors.find((c) => c.id === id) : null;
+  }
+
+  function renderActiveFilters() {
+    const chips = [];
+    const chip = (content, title, remove) => {
+      const b = el("button", { className: "filter-chip", title: `Remove: ${title}` }, content, el("span", { className: "x", textContent: "×" }));
+      b.addEventListener("click", () => { remove(); syncControls(); filtersChanged(); });
+      chips.push(b);
+    };
+    if (state.q) chip(`“${state.q}”`, "search", () => { state.q = ""; });
+    for (const t of state.tags) chip(`# ${tagNames[t] || t}`, "tag", () => { state.tags = state.tags.filter((x) => x !== t); });
+    for (const c of state.colors) {
+      const bin = colorBin(c);
+      const dot = el("span", { className: "dot" });
+      dot.style.background = bin ? bin.hex : "#888";
+      chip([dot, bin ? bin.name : `Color ${c}`], "color", () => { state.colors = state.colors.filter((x) => x !== c); });
+    }
+    for (const k of state.kinds) chip(kindLabel(k), "kind", () => { state.kinds = state.kinds.filter((x) => x !== k); });
+    for (const v of state.variants) chip(`variant: ${v}`, "variant", () => { state.variants = state.variants.filter((x) => x !== v); });
+    const box = $("active-filters");
+    box.hidden = !chips.length;
+    if (!chips.length) { box.replaceChildren(); return; }
+    const clear = el("button", { className: "link", textContent: "Clear all" });
+    clear.addEventListener("click", () => {
+      Object.assign(state, { q: "", tags: [], colors: [], kinds: [], variants: [] });
+      syncControls();
+      filtersChanged();
+    });
+    box.replaceChildren(el("span", { className: "label", textContent: "Showing:" }), ...chips, clear);
+  }
+
+  function syncControls() {
+    $("search").value = state.q;
+    $("langs").checked = state.langs;
+  }
+
+  // -- filter lists (colors, tags, kinds, variants) --------------------------------
+
+  function facetsQuery() {
+    const p = filterParams();
+    p.set("min_refs", $("min-refs").value || 3);
+    return p.toString();
+  }
+
+  async function loadFacets() {
+    if (!library || status.state !== "ready" || !state.folders.size) { facets = null; renderFacets(); return; }
+    const key = facetsQuery();
+    let result;
+    try { result = await api(`/api/facets?${key}`); } catch (e) { return; }
+    if (key !== facetsQuery() || result.error) return; // filters changed meanwhile
+    facets = result;
+    for (const t of facets.tags) tagNames[t.tag] = t.name;
+    renderFacets();
+    renderActiveFilters();
+  }
+
+  function toggle(list, value) {
+    return list.includes(value) ? list.filter((x) => x !== value) : [...list, value];
+  }
+
+  function renderFacets() {
+    const ready = facets && status.state === "ready";
+    // Colors
+    const hint = $("colors-hint");
+    if (!ready) {
+      hint.textContent = status.state === "ready" ? "Tick a folder to see colors." : "Available once indexing finishes.";
+      $("swatches").replaceChildren();
+    } else {
+      const partial = facets.colors_analyzed < facets.colors_total;
+      hint.textContent = partial
+        ? `Colors worked out for ${fmt(facets.colors_analyzed)} of ${fmt(facets.colors_total)} images so far.`
+        : "Main colors of each image. Pick several to need all of them.";
+      $("swatches").replaceChildren(...facets.colors.map((c) => {
+        const on = state.colors.includes(c.id);
+        const b = el("button", {
+          className: c.count || on ? "swatch" : "swatch empty",
+          title: `${c.name}: ${plural(c.count, "image")}`,
+          ariaLabel: `${c.name}, ${plural(c.count, "image")}`,
+        }, c.count ? el("span", { className: "n", textContent: c.count > 999 ? `${Math.floor(c.count / 1000)}k` : c.count }) : null);
+        b.setAttribute("aria-pressed", String(on));
+        b.style.background = c.hex;
+        b.addEventListener("click", () => { state.colors = toggle(state.colors, c.id); filtersChanged(); });
+        return b;
+      }));
+    }
+    // Tags
+    const list = $("tag-list");
+    const more = $("more-tags");
+    if (!ready) {
+      list.replaceChildren();
+      more.hidden = true;
+    } else {
+      const needle = $("tag-filter").value.trim().toLowerCase();
+      let tags = facets.tags.filter((t) => !needle || t.name.toLowerCase().includes(needle));
+      // Selected tags first, so they're easy to find and remove.
+      tags = [...tags.filter((t) => state.tags.includes(t.tag)), ...tags.filter((t) => !state.tags.includes(t.tag))];
+      const shown = showAllTags || needle ? tags : tags.slice(0, TAGS_SHOWN);
+      list.replaceChildren(...shown.map((t) => {
+        const b = el("button", { className: "tag-btn", title: `${plural(t.refs, "item")} with “${t.name}” in the name` },
+          t.name, el("span", { className: "n", textContent: ` ${fmt(t.refs)}` }));
+        b.setAttribute("aria-pressed", String(state.tags.includes(t.tag)));
+        b.addEventListener("click", () => { state.tags = toggle(state.tags, t.tag); filtersChanged(); });
+        return el("li", {}, b);
+      }));
+      if (!shown.length) list.append(el("li", { className: "hint", textContent: "No tags used this often here." }));
+      const hiddenCount = facets.tags_total - shown.length;
+      more.hidden = needle !== "" || (hiddenCount <= 0 && !showAllTags);
+      more.textContent = showAllTags ? "Show fewer" : `Show all ${fmt(facets.tags_total)}`;
+    }
+    // Kinds and variants
+    const facetList = (id, items, key, label, field) => {
+      $(id).replaceChildren(...(ready ? items : []).map((item) => {
+        const value = item[key];
+        const b = el("button", { className: "facet-btn" }, label(value), el("span", { className: "n", textContent: ` ${fmt(item.count)}` }));
+        b.setAttribute("aria-pressed", String(state[field].includes(value)));
+        b.addEventListener("click", () => { state[field] = toggle(state[field], value); filtersChanged(); });
+        return el("li", {}, b);
+      }));
+    };
+    facetList("kind-list", ready ? facets.kinds : [], "kind", kindLabel, "kinds");
+    facetList("variant-list", ready ? facets.variants : [], "variant", (v) => v, "variants");
   }
 
   // -- image grid -------------------------------------------------------------
 
-  function gridKey() {
-    const folders = library.folders.filter((f) => selected.has(f.name)).map((f) => f.name);
-    return JSON.stringify([library.path, folders, sort]);
-  }
-
-  // Start the grid over when the folders or sort changed (or force it).
+  // Start the grid over when what's shown changed (or force it).
   function loadGrid(force) {
     if (!library || status.state !== "ready") {
       $("grid").replaceChildren();
-      Object.assign(grid, { key: "", run: grid.run + 1, total: null, loading: false });
+      Object.assign(grid, { key: "", run: grid.run + 1, total: null, loading: false, items: [] });
       $("grid-msg").textContent = status.state === "error" ? "" : "Images appear here once indexing finishes.";
       renderCount();
       return;
     }
-    const key = gridKey();
+    const p = filterParams();
+    p.set("sort", state.sort);
+    const key = p.toString();
     if (!force && key === grid.key) return;
-    Object.assign(grid, { key, run: grid.run + 1, loaded: 0, total: null, loading: false });
+    Object.assign(grid, { key, run: grid.run + 1, loaded: 0, total: null, loading: false, items: [] });
     $("grid").replaceChildren();
     $("main").scrollTop = 0;
-    if (!selected.size) {
+    if (!state.folders.size) {
       $("grid-msg").textContent = "Tick one or more folders on the left.";
       renderCount();
       return;
@@ -205,36 +374,38 @@
     if (grid.loading || (grid.total !== null && grid.loaded >= grid.total)) return;
     const { key, run } = grid;
     grid.loading = true;
-    const params = new URLSearchParams({ sort, offset: grid.loaded, limit: PAGE });
-    for (const name of JSON.parse(key)[1]) params.append("folder", name);
+    const p = new URLSearchParams(key);
+    p.set("offset", grid.loaded);
+    p.set("limit", PAGE);
     let page;
     try {
-      page = await api(`/api/images?${params}`);
+      page = await api(`/api/images?${p}`);
     } catch (e) {
       page = { error: "Can't reach the tool. Is it still running?" };
     }
-    if (run !== grid.run) return; // the grid restarted meanwhile
+    if (run !== grid.run) return;
     grid.loading = false;
     if (page.error) { $("grid-msg").textContent = page.error; return; }
     grid.total = page.total;
+    const start = grid.items.length;
+    grid.items.push(...page.images);
     grid.loaded += page.images.length;
-    const many = JSON.parse(key)[1].length > 1;
-    $("grid").append(...page.images.map((image) => tile(image, many)));
-    $("grid-msg").textContent = grid.total ? "" : "These folders have no images.";
+    const many = state.folders.size > 1;
+    $("grid").append(...page.images.map((image, i) => tile(image, start + i, many)));
+    $("grid-msg").textContent = grid.total ? "" : "Nothing matches. Try removing a filter.";
     renderCount();
-    // Keep going while the sentinel is still on screen (tall windows, small cards).
     if (grid.loaded < grid.total && sentinelVisible()) loadMore();
   }
 
-  function tile(image, showFolder) {
+  function tile(image, i, showFolder) {
     const filename = image.path.split("/").pop();
     const img = el("img", { src: image.thumb, alt: image.name, loading: "lazy", decoding: "async" });
     img.addEventListener("error", () => img.replaceWith(el("span", { className: "no-preview", textContent: "No preview" })));
     const size = image.width && image.height ? `${image.width}×${image.height}` : "";
-    return el("a", {
+    const a = el("a", {
       className: image.entry_key ? "tile" : "tile unmatched",
       href: image.file, target: "_blank", rel: "noopener",
-      title: `${image.name}\n${image.path}${size ? `\n${size}` : ""}\n\nClick to open the full image in a new tab.`,
+      title: `${image.name}${image.kind ? ` · ${kindLabel(image.kind)}` : ""}\n${image.path}${size ? `\n${size}` : ""}`,
     },
     el("div", { className: "thumb" }, img),
     el("div", { className: "caption" },
@@ -242,6 +413,14 @@
       el("div", { className: "tile-meta" },
         image.variant ? el("span", { className: "chip", textContent: image.variant }) : null,
         el("span", { textContent: showFolder ? image.folder : size }))));
+    a.dataset.index = i;
+    a.addEventListener("click", (e) => {
+      // Ctrl/Cmd/middle click still opens the full image in a new tab.
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+      e.preventDefault();
+      openDetail(i);
+    });
+    return a;
   }
 
   function sentinelVisible() {
@@ -250,13 +429,189 @@
   }
 
   new IntersectionObserver((entries) => {
-    if (entries.some((e) => e.isIntersecting) && view === "images" && grid.key) loadMore();
+    if (entries.some((e) => e.isIntersecting) && state.view === "images" && grid.key) loadMore();
   }, { root: $("main"), rootMargin: "800px" }).observe($("sentinel"));
 
   function setTileSize(px) {
     $("grid").style.setProperty("--tile", `${px}px`);
     $("tile-size").value = px;
   }
+
+  // -- details panel -------------------------------------------------------------
+
+  async function openDetail(i) {
+    if (i < 0 || i >= grid.items.length) return;
+    current = i;
+    for (const t of document.querySelectorAll(".tile.current")) t.classList.remove("current");
+    const node = $("grid").querySelector(`[data-index="${i}"]`);
+    if (node) { node.classList.add("current"); node.scrollIntoView({ block: "nearest" }); }
+    await showDetail(grid.items[i].path);
+    // Near the end of what's loaded: fetch more so → keeps working.
+    if (i >= grid.items.length - 5) loadMore();
+  }
+
+  async function showDetail(path) {
+    const drawer = $("drawer");
+    const wasHidden = drawer.hidden;
+    drawer.hidden = false;
+    document.body.classList.add("drawer-open");
+    $("d-prev").disabled = current <= 0;
+    $("d-next").disabled = current < 0 || current >= (grid.total ?? 0) - 1;
+    let d;
+    try { d = await api(`/api/image?${new URLSearchParams({ path })}`); } catch (e) { d = { error: "Can't reach the tool." }; }
+    if (d.error) { $("d-name").textContent = "Not available"; $("d-sub").textContent = ""; $("d-body").replaceChildren(el("p", { textContent: d.error })); return; }
+    renderDetail(d);
+    if (wasHidden) drawer.focus();
+  }
+
+  function closeDetail() {
+    $("drawer").hidden = true;
+    document.body.classList.remove("drawer-open");
+    for (const t of document.querySelectorAll(".tile.current")) t.classList.remove("current");
+    current = -1;
+  }
+
+  // A small clickable image + label for related items.
+  function mini(item, label, onPick, isCurrent) {
+    const b = el("button", { className: "mini", title: label, disabled: !item.image && !onPick });
+    const inner = item.image
+      ? el("img", { src: item.image.thumb, alt: "", loading: "lazy" })
+      : el("span", { className: "none", textContent: "No image" });
+    b.append(el("div", { className: "thumb" }, inner), el("span", { className: "label", textContent: label }));
+    if (isCurrent) b.setAttribute("aria-current", "true");
+    if (item.image || onPick) b.addEventListener("click", () => (onPick ? onPick() : showRelated(item.image.path)));
+    return b;
+  }
+
+  function showRelated(path) {
+    // Jump within the grid if the image is loaded there; else show it on its own.
+    const i = grid.items.findIndex((x) => x.path === path);
+    if (i >= 0) { openDetail(i); return; }
+    current = -1;
+    for (const t of document.querySelectorAll(".tile.current")) t.classList.remove("current");
+    showDetail(path);
+  }
+
+  function renderDetail(d) {
+    const { image, entry } = d;
+    const filename = image.path.split("/").pop();
+    $("d-name").textContent = entry ? entry.name || "(no name)" : filename;
+    $("d-sub").textContent = [entry ? kindLabel(entry.kind) : "Not in the catalog", image.folder].join(" · ");
+    const body = [];
+
+    const preview = el("img", { src: image.file, alt: entry ? entry.name : filename });
+    body.push(el("div", { className: "preview" }, preview));
+    const copy = (text, what) => {
+      const b = el("button", { className: "secondary", textContent: `Copy ${what}` });
+      b.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(text); toast(`Copied ${what}`); } catch (e) { toast("Couldn't copy"); }
+      });
+      return b;
+    };
+    body.push(el("div", { className: "actions" },
+      el("a", { className: "secondary", href: image.file, target: "_blank", rel: "noopener", textContent: "Open full image" }),
+      copy(`${library.path}${library.path.includes("\\") ? "\\" : "/"}${image.path.replaceAll("/", library.path.includes("\\") ? "\\" : "/")}`, "path"),
+      entry ? copy(entry.id || entry.label, "ID") : null));
+
+    if (d.variants && d.variants.length > 1) {
+      body.push(el("h3", { textContent: `Variants (${d.variants.length})` }),
+        el("div", { className: "strip" }, d.variants.map((v) =>
+          mini({ image: v }, v.variant || "base", null, v.path === image.path))));
+    }
+
+    if (d.colors.length) {
+      const bar = el("div", { className: "color-bar" });
+      const total = d.colors.reduce((s, c) => s + c.share, 0);
+      for (const c of d.colors) {
+        const seg = el("div", { title: `${c.name} ${Math.round(c.share * 100)}%` });
+        seg.style.background = c.hex;
+        seg.style.flex = String(c.share / total);
+        bar.append(seg);
+      }
+      body.push(el("h3", { textContent: "Colors" }), bar,
+        el("div", { className: "color-legend" }, d.colors.map((c) => {
+          const dot = el("span", { className: "dot" });
+          dot.style.background = c.hex;
+          const b = el("button", { title: `Show images with ${c.name.toLowerCase()}` }, dot, `${c.name} ${Math.round(c.share * 100)}%`);
+          b.addEventListener("click", () => {
+            if (!state.colors.includes(c.id)) state.colors = [...state.colors, c.id];
+            filtersChanged();
+          });
+          return b;
+        })));
+    } else if (!d.analyzed) {
+      body.push(el("h3", { textContent: "Colors" }), el("p", { className: "hint", textContent: "Not worked out yet." }));
+    }
+
+    if (entry) {
+      if (entry.tags.length) {
+        body.push(el("h3", { textContent: "Tags" }), el("div", { className: "chips" }, entry.tags.map((t) => {
+          tagNames[t.tag] = t.name;
+          const b = el("button", { className: "tag-btn", textContent: t.name, title: `Show items with “${t.name}” in the name` });
+          b.setAttribute("aria-pressed", String(state.tags.includes(t.tag)));
+          b.addEventListener("click", () => { state.tags = toggle(state.tags, t.tag); filtersChanged(); renderDetail(d); });
+          return b;
+        })));
+      }
+      const rows = [];
+      const row = (label, value) => rows.push(el("tr", {}, el("th", { textContent: label }), el("td", {}, value)));
+      if (entry.description) row("Description", entry.description);
+      for (const r of d.references) {
+        const b = el("button", { className: "ref", textContent: r.name || r.key, disabled: !r.image });
+        if (r.image) b.addEventListener("click", () => showRelated(r.image.path));
+        row(`${r.field} → ${kindLabel(r.kind)}`, b);
+      }
+      const refFields = new Set(d.references.map((r) => r.field));
+      for (const [k, v] of Object.entries(entry.fields)) if (!refFields.has(k)) row(k, String(v));
+      row("Catalog section", entry.section);
+      if (entry.id) row("ID", el("code", { textContent: entry.id }));
+      if (entry.label && entry.label !== entry.id) row("Label", el("code", { textContent: entry.label }));
+      row("File", el("code", { textContent: image.path }));
+      if (image.width) row("Size", `${image.width} × ${image.height} px`);
+      body.push(el("h3", { textContent: "Details" }), el("table", { className: "facts" }, el("tbody", {}, rows)));
+
+      if (d.parent) {
+        body.push(el("h3", { textContent: `Part of · ${kindLabel(d.parent.kind)}` }),
+          el("div", { className: "strip" }, mini(d.parent, d.parent.name)));
+      }
+      if (d.children.length) {
+        body.push(el("h3", { textContent: `Contains (${fmt(d.children_total)})` }),
+          el("div", { className: "strip" }, d.children.map((c) => mini(c, c.name))));
+      }
+      if (d.referenced_by.length) {
+        body.push(el("h3", { textContent: `Linked from (${fmt(d.referenced_by_total)})` }),
+          el("p", { className: "hint", textContent: "Items whose catalog entry points here, such as a weapon's skins." }),
+          el("div", { className: "strip" }, d.referenced_by.map((c) => mini(c, c.name))));
+        if (d.referenced_by_total > d.referenced_by.length) {
+          body.push(el("p", { className: "hint", textContent: `Showing ${d.referenced_by.length}.` }));
+        }
+      }
+      const langs = Object.entries(entry.names);
+      if (langs.length) {
+        body.push(el("details", {}, el("summary", { textContent: `Name in other languages (${langs.length})` }),
+          el("dl", { className: "lang-list" }, langs.map(([k, v]) => [el("dt", { textContent: k }), el("dd", { textContent: v })]))));
+      }
+      body.push(el("details", {}, el("summary", { textContent: "Catalog entry (raw JSON)" }),
+        el("pre", { className: "raw", textContent: JSON.stringify(entry.raw, null, 2) })));
+    } else {
+      body.push(el("h3", { textContent: "Details" }), el("table", { className: "facts" }, el("tbody", {},
+        el("tr", {}, el("th", { textContent: "File" }), el("td", {}, el("code", { textContent: image.path }))),
+        image.width ? el("tr", {}, el("th", { textContent: "Size" }), el("td", { textContent: `${image.width} × ${image.height} px` })) : null)),
+      el("p", { className: "hint", textContent: "This file's name isn't a catalog ID or label, so there's no metadata for it." }));
+    }
+    $("d-body").replaceChildren(...body);
+    $("d-body").scrollTop = 0;
+  }
+
+  $("d-close").addEventListener("click", closeDetail);
+  $("d-prev").addEventListener("click", () => openDetail(current - 1));
+  $("d-next").addEventListener("click", () => openDetail(current + 1));
+  document.addEventListener("keydown", (e) => {
+    if ($("drawer").hidden || e.target.matches("input, select, textarea")) return;
+    if (e.key === "Escape") closeDetail();
+    else if (e.key === "ArrowRight" && current >= 0) { e.preventDefault(); openDetail(current + 1); }
+    else if (e.key === "ArrowLeft" && current > 0) { e.preventDefault(); openDetail(current - 1); }
+  });
 
   // -- match report -----------------------------------------------------------
 
@@ -285,8 +640,7 @@
   }
 
   function renderSelection() {
-    updateAllBox();
-    const chosen = library.folders.filter((f) => selected.has(f.name));
+    const chosen = library.folders.filter((f) => state.folders.has(f.name));
     const images = chosen.reduce((sum, f) => sum + f.images, 0);
     const box = $("folder-report");
     if (!chosen.length) {
@@ -372,22 +726,62 @@
       more > 0 ? el("p", { textContent: `… and ${fmt(more)} more. Run uv run imagefind --report for the full list.` }) : null));
   }
 
+  // What the catalog holds: fields per kind, with how often they're filled in.
+  async function loadCatalogOverview() {
+    const box = $("catalog-overview");
+    if (status.state !== "ready") { box.hidden = true; return; }
+    let result;
+    try { result = await api("/api/catalog"); } catch (e) { return; }
+    if (result.error) return;
+    const share = (n, of) => `${fmt(n)} (${pct(n, of)})`;
+    box.hidden = false;
+    box.replaceChildren(
+      el("h2", { textContent: "What the catalog holds" }),
+      el("p", { textContent: "For each kind of item: how many have a description, names in other languages, " +
+        "and which other fields, with example values. Every item also has an English name and an ID or label." }),
+      el("div", { className: "table-wrap" }, el("table", {},
+        el("thead", {}, el("tr", {},
+          el("th", { textContent: "Catalog kind" }),
+          el("th", { className: "num", textContent: "Entries" }),
+          el("th", { className: "num", textContent: "Description" }),
+          el("th", { className: "num", textContent: "Other languages" }),
+          el("th", { textContent: "Other fields" }))),
+        el("tbody", {}, result.kinds.map((k) => el("tr", {},
+          el("td", { textContent: kindLabel(k.kind) }),
+          el("td", { className: "num", textContent: fmt(k.entries) }),
+          el("td", { className: "num", textContent: share(k.description, k.entries) }),
+          el("td", { className: "num", textContent: share(k.other_languages, k.entries) }),
+          el("td", {}, k.fields.length
+            ? el("div", { className: "chips" }, k.fields.map((f) => el("span", {
+              className: "chip",
+              title: `e.g. ${f.examples.map((x) => JSON.stringify(x)).join(", ")}`,
+            }, f.field, el("span", { className: "num", textContent: ` ${pct(f.count, k.entries)}` }))))
+            : el("span", { className: "hint", textContent: "–" }))))))),
+      el("p", { className: "hint", textContent: "Hover a field for example values. Fields holding another item's ID " +
+        "(like a skin's weaponId) show as links in an image's details." }));
+  }
+
   // -- index status -------------------------------------------------------------
 
   async function refreshStatus() {
     const wasReady = status.state === "ready";
+    const wasWorking = status.thumbs && status.thumbs.running;
     try { status = await api("/api/status"); } catch (e) { return; }
     if (!library) return;
+    const working = status.thumbs && status.thumbs.running;
     if (status.state === "ready" && wasReady) {
-      renderStatus(); // only the thumbnail progress changes
+      renderStatus(); // only the background progress changes
+      if (wasWorking) loadFacets(); // color counts grow as colors are worked out
     } else {
       renderStatus();
       renderReport();
       loadGrid(true);
+      loadFacets();
+      loadCatalogOverview();
     }
     clearTimeout(polling);
     if (status.state === "indexing") polling = setTimeout(refreshStatus, 400);
-    else if (status.thumbs && status.thumbs.running) polling = setTimeout(refreshStatus, 2000);
+    else if (working) polling = setTimeout(refreshStatus, 3000);
   }
 
   // -- open panel -----------------------------------------------------------
@@ -406,6 +800,8 @@
       if (changed) history.replaceState(null, "", location.pathname);
       readHash();
       status = { state: "indexing", done: 0, total: library.images };
+      facets = null;
+      closeDetail();
       showPanel(false);
       render();
       loadGrid(true);
@@ -448,22 +844,39 @@
   // -- controls -------------------------------------------------------------
 
   $("all").addEventListener("change", () => {
-    selected = new Set($("all").checked ? library.folders.map((f) => f.name) : []);
+    state.folders = new Set($("all").checked ? library.folders.map((f) => f.name) : []);
     render();
-    selectionChanged();
+    filtersChanged();
   });
 
   for (const tab of document.querySelectorAll(".tabs button")) {
     tab.addEventListener("click", () => {
-      view = tab.dataset.view;
+      state.view = tab.dataset.view;
       writeHash();
       renderView();
-      if (view === "images") loadGrid();
+      if (state.view === "images") loadGrid();
     });
   }
 
+  const searchChanged = debounce(() => {
+    state.q = $("search").value.trim();
+    filtersChanged();
+  }, 250);
+  $("search").addEventListener("input", searchChanged);
+  $("langs").addEventListener("change", () => { state.langs = $("langs").checked; if (state.q) filtersChanged(); else writeHash(); });
+
+  $("tag-filter").addEventListener("input", renderFacets);
+  $("min-refs").value = prefs.get("minRefs", 3);
+  $("min-refs").addEventListener("change", () => {
+    const n = Math.max(1, Number($("min-refs").value) || 3);
+    $("min-refs").value = n;
+    prefs.set("minRefs", n);
+    loadFacets();
+  });
+  $("more-tags").addEventListener("click", () => { showAllTags = !showAllTags; renderFacets(); });
+
   $("sort").addEventListener("change", () => {
-    sort = $("sort").value;
+    state.sort = $("sort").value;
     writeHash();
     loadGrid();
   });
@@ -480,6 +893,7 @@
     readHash();
     render();
     loadGrid();
+    loadFacets();
   });
 
   $("exit").addEventListener("click", async () => {
@@ -488,6 +902,7 @@
     if (window.__ifKeepalive) window.__ifKeepalive.stop();
     $("open-panel").hidden = true;
     $("layout").hidden = true;
+    $("drawer").hidden = true;
     $("stopped").hidden = false;
   });
 

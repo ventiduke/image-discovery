@@ -127,6 +127,32 @@ def test_images_lists_a_page(ready):
     assert ready.get("/api/images", params={"limit": 5000}).status_code == 422
 
 
+def test_images_take_filters(ready):
+    res = ready.get("/api/images", params={"folder": ["Maps", "Weapons"], "q": "kasb"}).json()
+    assert res["total"] == 2 and {i["name"] for i in res["images"]} == {"Kasbah"}
+    res = ready.get("/api/images", params={"folder": "Weapons", "tag": "vandal"}).json()
+    assert res["total"] == 2
+    res = ready.get("/api/images", params={"folder": "Weapons", "variant": "killstream"}).json()
+    assert res["total"] == 35
+    assert ready.get("/api/images", params={"folder": "Weapons", "color": "x"}).status_code == 422
+
+
+def test_facets_detail_and_catalog(ready):
+    facets = ready.get("/api/facets", params={"folder": ["Maps", "Weapons"]}).json()
+    assert len(facets["colors"]) == 28 and facets["colors_analyzed"] == 0  # not worked out (warming is off)
+    assert {"tag": "vandal", "name": "Vandal", "refs": 1} not in facets["tags"]  # one item: under 3
+    assert any(t["refs"] >= 3 for t in facets["tags"]) or facets["tags"] == []
+    tags1 = ready.get("/api/facets", params={"folder": "Weapons", "min_refs": 1}).json()["tags"]
+    assert {"tag": "vandal", "name": "Vandal", "refs": 1} in tags1
+    path = ready.get("/api/images", params={"folder": "Weapons", "q": "vandal"}).json()["images"][0]["path"]
+    detail = ready.get("/api/image", params={"path": path}).json()
+    assert detail["entry"]["name"] == "Vandal"
+    assert detail["image"]["thumb"].startswith("/thumb/") and detail["variants"][0]["file"].startswith("/file/")
+    assert ready.get("/api/image", params={"path": "nope"}).json() == {"error": "No such image."}
+    kinds = {k["kind"] for k in ready.get("/api/catalog").json()["kinds"]}
+    assert {"weapons", "weaponSkins.chromas", "characters.abilities"} <= kinds
+
+
 def test_thumbnails_and_originals(ready, tmp_path):
     big = "Maps/1C18AB1F-420D-0D8B-71D0-77AD3C439115_listview.png"  # 456 x 100
     res = ready.get(f"/thumb/{big}")
@@ -156,8 +182,13 @@ def test_thumbnails_are_warmed_after_indexing(tmp_path):
     session.wait()
     session.warmer.join(60)
     thumbs = c.get("/api/status").json()["thumbs"]
-    assert thumbs["done"] == thumbs["total"] > 0 and thumbs["failed"] == 0 and not thumbs["running"]
-    assert len(list((tmp_path / "thumbs").rglob("*.webp"))) == thumbs["total"]
+    assert thumbs["done"] == thumbs["total"] == 74 and thumbs["failed"] == 0 and not thumbs["running"]
+    made = len(list((tmp_path / "thumbs").rglob("*.webp")))
+    assert 0 < made < 74  # small images need no thumbnail, but still get their colours
+    folders = {"folder": ["Maps", "Weapons"]}
+    facets = c.get("/api/facets", params=folders).json()
+    assert facets["colors_analyzed"] == facets["colors_total"] == 74
+    assert sum(col["count"] for col in facets["colors"]) > 0
     # Opening the folder again finds nothing left to do.
     c.post("/api/open", json={"path": str(CONTENT)})
     session.wait()

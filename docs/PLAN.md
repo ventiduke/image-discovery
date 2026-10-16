@@ -2,7 +2,7 @@
 
 Oct 16, 2026
 
-**Progress:** milestones 1 (skeleton), 2 (catalog and scan) and 3 (grid browsing) are built. Against a synthetic dump of 10,453 files with the real catalog, the first index takes about 3 seconds and later ones about 0.2 seconds; the 7,408 images larger than a thumbnail get thumbnails in about 30 seconds on 4 cores. The full dump has been checked: every file matches a catalog entry.
+**Progress:** milestones 1 (skeleton), 2 (catalog and scan), 3 (grid browsing) and 4 (search, filters, tags, colors and the details panel, which brings in much of 5) are built. Against a synthetic dump of 10,453 files with the real catalog, the first index takes about 3 seconds and later ones about 0.2 seconds; thumbnails and colour analysis for all 10,453 take about 40 seconds on 4 cores. The full dump has been checked: every file matches a catalog entry.
 
 ## Goal and scope
 
@@ -167,8 +167,14 @@ The URL hash holds the current folder selection, query and open image, so a view
 1. **Skeleton.** Package, CLI, server, folder picker, presence shutdown (ported from `local-html-edit`), `.gitignore` for `.cache/`. Opens `content/` by default and shows its subfolders and counts.
 2. **Catalog and scan.** Catalog flattening, filename parsing, the ID join and the SQLite index, with tests on the sample content (all 74 sample images resolve to entries).
 3. **Grid browsing.** Folder selection, background thumbnail generation and caching, paged infinite-scroll grid.
-4. **Search and filters.** FTS search (English, plus the all-languages toggle), facets, sorting, URL state.
-5. **Relationships and detail panel.** The `relations` table, inferred collections, weapon and collection filters, the detail panel with variants, metadata and the "Related" strip, copy and reveal actions, keyboard navigation.
+4. **Search, filters, tags and colours** (expanded on request). Done:
+   - Search as you type over English names, descriptions, IDs and *related* names (an ability's character, a skin's weapon), with an all-languages toggle.
+   - Tags: the words in item names, counted by items (not files), listed when used by at least N items (default 3); several tags narrow down.
+   - Colours: each image's share of 28 colour bins (4 neutrals, 12 hues × bright/dark), worked out in the background alongside thumbnails; a swatch grid with counts filters to images with at least 10% of every picked colour, best matches first.
+   - Kind and variant filters; all filter counts follow the other filters.
+   - Details panel: preview, variants, colours, tags, every catalog field (IDs that point at other items shown as links), parent, contents, items that link here, other-language names and the raw JSON; ← → to step through the grid.
+   - "What the catalog holds" in the report tab: for each kind, how often each field is filled in, with examples.
+5. **Relationships.** Remaining: inferred collections as a filter, "show all of these in the grid" from the details panel (e.g. all of a weapon's skins), reveal in Explorer/Finder.
 6. **Full dump and refresh.** Run against the real 11,000-file drop: first-run indexing and thumbnail time, incremental re-index, the refresh helper, "new in this drop", the missing-images report, and handling of non-PNG files and filenames that don't parse.
 
 ## Open questions
@@ -177,6 +183,7 @@ None that block milestone 1. To confirm before milestone 2, a few sample filenam
 
 ## Decisions
 
+- **Added after milestone 3** (requested): search, more visibility of the metadata, tags from item names (filtered by how many items use them, 3+ by default), and a colour map/filter.
 - **Full dump:** 11,262 files in 12 folders, over 1 GB (folder list above). Thumbnails are pre-generated in the background from the start.
 - **Language:** English is the primary language for display and search; other languages are an opt-in search toggle.
 - **Content location:** the full dump lives in the repo's `content/` and is replaced about monthly. Generated files stay out of git.

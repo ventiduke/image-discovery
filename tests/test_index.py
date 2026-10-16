@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -80,7 +81,7 @@ def test_search_table(content, tmp_path):
     def search(q):
         return sorted(k for (k,) in rows(db, f"SELECT key FROM entries_fts WHERE entries_fts MATCH '{q}'"))
 
-    assert search("gekko") == ["C1"]
+    assert search("gekko") == ["C1", "C1_ABILITY1"]  # the ability through its character
     assert search("wing*") == ["C1_ABILITY1"]
     assert search("crew") == ["C1"]  # descriptions
     assert search("other_names:fr") == ["C1", "C1_ABILITY1", "M1", "M2"]
@@ -168,25 +169,183 @@ def test_content_folder_is_never_written(content, tmp_path):
     assert sorted(p.relative_to(content) for p in content.rglob("*")) == before
 
 
+def F(*folders, **kw):
+    return index.Filters(list(folders), **kw)
+
+
 def test_list_images_sorts_pages_and_filters(content, tmp_path):
     db = db_of(tmp_path)
     (content / "Abilities" / "big.png").write_bytes(PNG + b"\0" * 1000)
     index.build(open_library(content), db)
-    with index.connect(db) as conn:
-        total, rows = index.list_images(conn, ["Maps", "Abilities"])
+    with closing(index.connect(db)) as conn:
+        total, rows = index.list_images(conn, F("Maps", "Abilities"))
         assert total == 5
         # By English name, unmatched files by filename, variants after the base image.
         assert [(r["name"] or r["stem"], r["variant"]) for r in rows] == [
             ("Ascent", ""), ("Ascent", "splash"), ("big", ""), ("mystery", ""), ("Wingman", ""),
         ]
         assert rows[0]["kind"] == "maps" and rows[2]["entry_key"] is None
-        assert [r["path"] for r in index.list_images(conn, ["Maps", "Abilities"], offset=1, limit=2)[1]] == \
+        assert [r["path"] for r in index.list_images(conn, F("Maps", "Abilities"), offset=1, limit=2)[1]] == \
             ["Maps/M1_splash.png", "Abilities/big.png"]
-        assert index.list_images(conn, ["Maps", "Abilities"], sort="size")[1][0]["path"] == "Abilities/big.png"
-        assert [r["folder"] for r in index.list_images(conn, ["Maps", "Abilities"], sort="folder")[1]] == \
+        assert index.list_images(conn, F("Maps", "Abilities"), sort="size")[1][0]["path"] == "Abilities/big.png"
+        assert [r["folder"] for r in index.list_images(conn, F("Maps", "Abilities"), sort="folder")[1]] == \
             ["Abilities", "Abilities", "Maps", "Maps", "Maps"]
-        assert index.list_images(conn, []) == (0, [])
-        assert index.list_images(conn, ["Nope"])[0] == 0
+        assert index.list_images(conn, F()) == (0, [])
+        assert index.list_images(conn, F("Nope"))[0] == 0
         assert index.image(conn, "Maps/M1.png")["width"] == 64
         assert index.image(conn, "../secret.png") is None
         assert len(index.all_images(conn)) == 5
+
+
+def paths(conn, f):
+    return sorted(r["path"] for r in index.list_images(conn, f, limit=1000)[1])
+
+
+def test_search(content, tmp_path):
+    db = db_of(tmp_path)
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        everything = F("Maps", "Abilities")
+        search = lambda q, **kw: paths(conn, F("Maps", "Abilities", q=q, **kw))  # noqa: E731
+        assert search("asc") == ["Maps/M1.png", "Maps/M1_splash.png"]  # prefix of a name
+        assert search("ASCENT") == search("asc")
+        assert search("gekko") == ["Abilities/C1_Ability1.png"]  # an ability, by its character
+        assert search("crew") == []  # a description belongs to its own item only (Gekko has no image)
+        assert search("wing gek") == ["Abilities/C1_Ability1.png"]  # every word must match
+        assert search("wing ascent") == []
+        assert search("mystery") == ["Maps/mystery.png"]  # unmatched files by filename
+        assert search("c1_ab") == ["Abilities/C1_Ability1.png"]  # IDs and labels
+        assert search("(fr)") == search("fr") == []  # other languages only when asked
+        assert len(search("fr", all_languages=True)) == 3
+        assert search('"*:') == []  # punctuation can't break the query
+        assert search("100%_") == []
+        assert len(paths(conn, everything)) == 4
+
+
+def test_tags_and_kind_and_variant_filters(content, tmp_path):
+    db = db_of(tmp_path)
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        assert paths(conn, F("Maps", "Abilities", tags=["ascent"])) == ["Maps/M1.png", "Maps/M1_splash.png"]
+        assert paths(conn, F("Maps", "Abilities", tags=["Ascent", "wingman"])) == []
+        assert paths(conn, F("Maps", "Abilities", kinds=["characters.abilities"])) == ["Abilities/C1_Ability1.png"]
+        assert paths(conn, F("Maps", "Abilities", variants=["splash"])) == ["Maps/M1_splash.png"]
+        assert len(paths(conn, F("Maps", "Abilities", variants=["base"]))) == 3
+        assert len(paths(conn, F("Maps", "Abilities", variants=["base", "splash"]))) == 4
+
+
+def test_colors_filter_and_sort(content, tmp_path):
+    db = db_of(tmp_path)
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        index.save_colors(conn, [("Maps/M1.png", {4: 0.5, 3: 0.4}), ("Maps/M1_splash.png", {4: 0.8}),
+                                 ("Maps/mystery.png", {4: 0.05, 20: 0.9}), ("Abilities/C1_Ability1.png", {})])
+        f = F("Maps", "Abilities", colors=[4])
+        assert [r["path"] for r in index.list_images(conn, f)[1]] == ["Maps/M1_splash.png", "Maps/M1.png"]
+        assert paths(conn, F("Maps", "Abilities", colors=[4, 3])) == ["Maps/M1.png"]
+        facets = index.facets(conn, F("Maps", "Abilities"))
+        counts = {c["id"]: c["count"] for c in facets["colors"]}
+        assert (counts[4], counts[3], counts[20], counts[0]) == (2, 1, 1, 0)
+        assert (facets["colors_analyzed"], facets["colors_total"]) == (4, 4)
+        # Re-saving replaces an image's colours.
+        index.save_colors(conn, [("Maps/M1.png", {20: 1.0})])
+        assert paths(conn, F("Maps", colors=[4])) == ["Maps/M1_splash.png"]
+
+
+def test_changed_files_lose_their_colors(content, tmp_path):
+    db = db_of(tmp_path)
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        index.save_colors(conn, [("Maps/M1.png", {4: 1.0}), ("Maps/M1_splash.png", {4: 1.0})])
+    os.utime(content / "Maps" / "M1.png", ns=(1, 1))
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        assert paths(conn, F("Maps", colors=[4])) == ["Maps/M1_splash.png"]
+        assert {r["path"]: r["analyzed"] for r in index.all_images(conn)}["Maps/M1.png"] == 0
+
+
+def test_facets(content, tmp_path):
+    catalog = json.loads((content / "PublicContentCatalog.json").read_text())
+    catalog["maps"] += [{"id": "M3", "name": loc("Ascent Night")}, {"id": "M4", "name": loc("Night Market")}]
+    (content / "PublicContentCatalog.json").write_text(json.dumps(catalog))
+    for name in ("M2", "M3", "M4"):
+        (content / "Maps" / f"{name}.png").write_bytes(PNG)
+    db = db_of(tmp_path)
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        everything = F("Maps", "Abilities")
+        tags = {t["tag"]: t["refs"] for t in index.facets(conn, everything, min_refs=1)["tags"]}
+        # Items, not files: Ascent's two variants count once.
+        assert tags == {"ascent": 2, "night": 2, "bind": 1, "market": 1, "wingman": 1}
+        assert {t["tag"] for t in index.facets(conn, everything, min_refs=2)["tags"]} == {"ascent", "night"}
+        assert index.facets(conn, everything, min_refs=2)["tags_total"] == 2
+        narrowed = {t["tag"]: t["refs"] for t in index.facets(conn, F("Maps", tags=["night"]), min_refs=1)["tags"]}
+        assert narrowed == {"night": 2, "ascent": 1, "market": 1}
+        result = index.facets(conn, F("Maps", "Abilities", kinds=["maps"]))
+        # A filter's own counts ignore its own selection.
+        assert {k["kind"]: k["count"] for k in result["kinds"]} == {"maps": 5, "characters.abilities": 1}
+        assert {v["variant"]: v["count"] for v in result["variants"]} == {"base": 4, "splash": 1}
+        assert next(t for t in index.facets(conn, everything, min_refs=1)["tags"] if t["tag"] == "ascent")["name"] == "Ascent"
+
+
+def test_image_detail(content, tmp_path):
+    catalog = json.loads((content / "PublicContentCatalog.json").read_text())
+    catalog["weapons"] = [{"id": "W1", "label": "W1", "name": loc("Vandal"), "category": "Rifle"}]
+    catalog["weaponSkins"] = [{"id": "S1", "label": "S1", "name": loc("Reaver Vandal"), "weaponId": "W1",
+                               "chromas": [{"id": "K1", "label": "K1", "name": loc("Reaver Vandal Red")}]}]
+    (content / "PublicContentCatalog.json").write_text(json.dumps(catalog))
+    (content / "Weapons").mkdir()
+    for name in ("Weapons/W1.png", "Weapons/W1_killstream.png", "Maps/K1.png"):
+        (content / name).write_bytes(PNG)
+    db = db_of(tmp_path)
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        index.save_colors(conn, [("Weapons/W1.png", {4: 0.7, 3: 0.3})])
+        weapon = index.image_detail(conn, "Weapons/W1.png")
+        assert weapon["entry"]["name"] == "Vandal" and weapon["entry"]["fields"] == {"category": "Rifle"}
+        assert [v["variant"] for v in weapon["variants"]] == ["", "killstream"]
+        assert [c["name"] for c in weapon["colors"]] == ["Red", "White"] and weapon["analyzed"]
+        assert [r["name"] for r in weapon["referenced_by"]] == ["Reaver Vandal"]  # the skin
+        assert weapon["entry"]["tags"] == [{"tag": "vandal", "name": "Vandal"}]
+        assert weapon["entry"]["names"] == {"fr-FR": "Vandal (fr)"}
+
+        chroma = index.image_detail(conn, "Maps/K1.png")
+        assert chroma["parent"]["name"] == "Reaver Vandal" and chroma["parent"]["image"] is None
+        assert chroma["colors"] == [] and not chroma["analyzed"]
+        skin = index._entry_summary(conn, "S1")
+        assert skin["kind"] == "weaponSkins"
+        assert [r["field"] for r in index.image_detail(conn, "Weapons/W1.png")["references"]] == []
+
+        ability = index.image_detail(conn, "Abilities/C1_Ability1.png")
+        assert ability["parent"]["name"] == "Gekko"
+        unmatched = index.image_detail(conn, "Maps/mystery.png")
+        assert unmatched["entry"] is None and unmatched["image"]["path"] == "Maps/mystery.png"
+        assert index.image_detail(conn, "nope.png") is None
+
+
+def test_references_resolve_to_entries(content, tmp_path):
+    catalog = json.loads((content / "PublicContentCatalog.json").read_text())
+    catalog["weapons"] = [{"id": "W1", "label": "W1", "name": loc("Vandal")}]
+    catalog["weaponSkins"] = [{"id": "S1", "label": "S1", "name": loc("Prime"), "weaponId": "W1"}]
+    (content / "PublicContentCatalog.json").write_text(json.dumps(catalog))
+    (content / "Weapons").mkdir()
+    (content / "Weapons" / "S1.png").write_bytes(PNG)
+    (content / "Weapons" / "W1.png").write_bytes(PNG)
+    db = db_of(tmp_path)
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        skin = index.image_detail(conn, "Weapons/S1.png")
+        assert [(r["field"], r["name"], r["image"]["path"]) for r in skin["references"]] == \
+            [("weaponId", "Vandal", "Weapons/W1.png")]
+        # The skin is found by its weapon's name, even though "Vandal" isn't in its own.
+        assert paths(conn, F("Weapons", q="vandal")) == ["Weapons/S1.png", "Weapons/W1.png"]
+
+
+def test_catalog_overview(content, tmp_path):
+    db = db_of(tmp_path)
+    index.build(open_library(content), db)
+    with closing(index.connect(db)) as conn:
+        kinds = {k["kind"]: k for k in index.catalog_overview(conn)}
+    assert set(kinds) == {"maps", "characters", "characters.abilities"}
+    assert (kinds["maps"]["entries"], kinds["maps"]["with_images"], kinds["maps"]["other_languages"]) == (2, 1, 2)
+    assert kinds["characters"]["description"] == 1

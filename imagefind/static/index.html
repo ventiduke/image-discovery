@@ -16,18 +16,45 @@
 </header>
 
 <div class="layout" id="layout" hidden>
-  <aside class="sidebar" aria-label="Folders">
-    <div class="sidebar-head">
-      <h2>Folders</h2>
+  <aside class="sidebar" aria-label="Filters">
+    <details class="section" open>
+      <summary><h2>Folders</h2></summary>
       <label class="all"><input type="checkbox" id="all"> All</label>
-    </div>
-    <ul class="folders" id="folders"></ul>
+      <ul class="folders" id="folders"></ul>
+    </details>
+    <details class="section" open id="colors-section">
+      <summary><h2>Colors</h2></summary>
+      <p class="hint" id="colors-hint"></p>
+      <div class="swatches" id="swatches" role="group" aria-label="Filter by color"></div>
+    </details>
+    <details class="section" open>
+      <summary><h2>Tags</h2></summary>
+      <p class="hint">Words from item names. Pick several to narrow down.</p>
+      <div class="tag-controls">
+        <input type="search" id="tag-filter" placeholder="Find a tag" aria-label="Find a tag" autocomplete="off">
+        <label title="Only list tags used by at least this many items">Min <input type="number" id="min-refs" min="1" max="999" value="3"></label>
+      </div>
+      <ul class="tag-list" id="tag-list"></ul>
+      <button class="link" id="more-tags" hidden></button>
+    </details>
+    <details class="section">
+      <summary><h2>Kind</h2></summary>
+      <ul class="facet-list" id="kind-list"></ul>
+    </details>
+    <details class="section">
+      <summary><h2>Variant</h2></summary>
+      <ul class="facet-list" id="variant-list"></ul>
+    </details>
   </aside>
   <main class="main" id="main">
     <div class="toolbar">
       <div class="tabs" role="tablist" aria-label="View">
         <button role="tab" data-view="images" id="tab-images">Images</button>
         <button role="tab" data-view="report" id="tab-report">Match report</button>
+      </div>
+      <div class="search" id="search-box">
+        <input type="search" id="search" placeholder="Search names, descriptions, IDs…" aria-label="Search" autocomplete="off" spellcheck="false">
+        <label class="langs" title="Also match names in the other 17 languages"><input type="checkbox" id="langs"> All languages</label>
       </div>
       <div class="result-count" id="result-count" aria-live="polite"></div>
       <div class="grid-controls" id="grid-controls">
@@ -45,6 +72,7 @@
       <ul class="warnings" id="warnings"></ul>
       <section class="panel" id="status" hidden></section>
       <section id="view-images">
+        <div class="active-filters" id="active-filters" hidden></div>
         <div class="thumbs-progress" id="thumbs-progress" hidden></div>
         <div class="grid" id="grid"></div>
         <div class="grid-msg" id="grid-msg"></div>
@@ -55,10 +83,21 @@
         <section class="panel" id="folder-report"></section>
         <section class="panel" id="coverage" hidden></section>
         <section class="panel" id="unmatched" hidden></section>
+        <section class="panel" id="catalog-overview" hidden></section>
       </section>
     </div>
   </main>
 </div>
+
+<aside class="drawer" id="drawer" hidden aria-label="Image details" tabindex="-1">
+  <div class="drawer-head">
+    <div class="drawer-title"><h2 id="d-name"></h2><div class="d-sub" id="d-sub"></div></div>
+    <button class="icon-btn" id="d-prev" title="Previous image (←)" aria-label="Previous image">‹</button>
+    <button class="icon-btn" id="d-next" title="Next image (→)" aria-label="Next image">›</button>
+    <button class="icon-btn" id="d-close" title="Close (Esc)" aria-label="Close">×</button>
+  </div>
+  <div class="drawer-body" id="d-body"></div>
+</aside>
 
 <div class="open-panel" id="open-panel" hidden>
   <div class="card">

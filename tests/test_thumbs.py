@@ -48,12 +48,15 @@ def test_warmer_makes_missing_thumbnails_and_reports_failures(tmp_path):
     (tmp_path / "broken.png").write_bytes(b"not an image")
     jobs.append((tmp_path / "broken.png", tmp_path / "t" / "broken.webp"))
     errors = []
-    warmer = thumbs.Warmer(jobs, total=len(jobs), workers=2, on_error=lambda p, e: errors.append(p.name))
+    finished = []
+    warmer = thumbs.Warmer(jobs, total=len(jobs), workers=2, on_error=lambda job, e: errors.append(job[0].name),
+                           on_finish=lambda: finished.append(1))
     warmer.join(30)
     assert not warmer.running
     assert (warmer.done, warmer.failed) == (7, 1)
     assert errors == ["broken.png"]
     assert all(target.exists() for _, target in jobs[:-1])
+    assert finished == [1]  # once, from the last thread
 
 
 def test_warmer_stops_between_images(tmp_path):
@@ -68,3 +71,10 @@ def test_warmer_stops_between_images(tmp_path):
     warmer.stop()
     warmer.join(5)
     assert not warmer.running and warmer.done < 10_000
+
+
+def test_warmer_runs_any_job(tmp_path):
+    seen = []
+    warmer = thumbs.Warmer(range(50), total=50, process=seen.append, workers=3)
+    warmer.join(10)
+    assert sorted(seen) == list(range(50)) and warmer.done == 50
