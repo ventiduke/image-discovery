@@ -42,7 +42,26 @@ Two things the tool must not assume:
 - **Folder names don't have to equal section names.** `Weapons` happens to match `weapons`, but the tool should match images to entries by ID across the whole catalog, not by folder name. Then a folder like `Skins` holding chroma images still resolves.
 - **Not every image will have a catalog entry, and not every entry will have an image.** Unmatched images still appear in the grid (searchable by filename); entries with no image can be counted in a "missing images" report.
 
-**The full dump** is about 11,000 files and over 1 GB, and it will live in this repo's `content/` folder, replaced about once a month.
+**The full dump** is 11,262 files and over 1 GB, and it will live in this repo's `content/` folder, replaced about once a month. Its folders, compared with the catalog:
+
+| Folder | Files | Catalog section | Entries | What the count suggests |
+| --- | --- | --- | --- | --- |
+| Abilities | 118 | `characters[].abilities` | 121 | One image per ability. **Abilities have no `id`**, only a `label` of the form `<character id>_Ability1` (see below) |
+| Armors | 3 | `armors` | 3 | One each |
+| CharacterRoles | 4 | `characterRoles` | 4 | One each |
+| Characters | 89 | `characters` | 30 | About 3 variants per character |
+| Charms | 898 | `charms` (898, each with 1 level) | 898 | One each, by charm or level ID |
+| Flexes | 23 | `flexes` | 23 | One each |
+| GameModes | 16 | `gameModes` | 18 | Two modes without images |
+| Maps | 72 | `maps` | 27 | About 3 variants (base, `_listview`, `_splash`) for most maps |
+| PlayerCards | 4,058 | `playerCards` | 1,016 | About 4 variants per card |
+| Sprays | 921 | `sprays` (921, each with 1 level) | 921 | One each, by spray or level ID |
+| Weapons | 70 | `weapons` | 36 | Base + `_killstream` for 35 weapons |
+| WeaponSkins | 4,990 | `weaponSkins` + chromas + levels | 1,415 + 2,931 + 2,692 | Images for some skins, chromas and levels, not all |
+
+Sections with no folder: `playerTitles` (text only), `acts`, `matchmakingQueues`. They're still indexed, so they show up in search as text results with no image, and acts can be used as filters if a link to them turns up.
+
+**Filenames are matched by `label` as well as `id`.** Abilities show why: the image for Gekko's "Wingman" is probably `E370FA57-…_Ability1.png`, which a plain `<id>_<variant>` split would misread as a character image with an `Ability1` variant. So the scanner first looks up the whole filename (without the extension) as an ID or label, and only if that fails splits off the last `_suffix` as a variant. Files that match nothing are listed in an "unmatched files" report, so naming surprises in the other folders show up on the first run rather than silently.
 
 ## Content in the repo
 
@@ -77,7 +96,7 @@ Dependencies: `fastapi`, `uvicorn`, `pillow`. SQLite with FTS5 ships with Python
 ### Indexing (on open)
 
 1. **Load the catalog.** Walk every section and record each object that has an `id`: the section, its parent if nested (for example a chroma's skin and that skin's weapon), the English name, all localized names, the description, and the scalar fields (`category`, `type`, `titleText`, …). Keep the raw JSON for each entry for the detail panel.
-2. **Scan the folders.** For each image file: folder, filename, ID, variant, size, modified time and pixel dimensions (read from the header only, which is fast).
+2. **Scan the folders.** For each image file: folder, filename, matched ID or label (rule above), variant, size, modified time and pixel dimensions (read from the header only, which is fast).
 3. **Join on ID** (case-insensitive) and write everything to a SQLite database in the cache folder: an `images` table, an `entries` table and an FTS5 table over names, descriptions, IDs and filenames.
 4. **Reuse the index next time.** Store the catalog's `version`, its mtime, and each folder's file count and newest mtime; rebuild only what changed. `--rebuild` forces a full rebuild.
 
@@ -118,7 +137,7 @@ Built from the catalog during indexing and stored as a `relations` table (from I
 | Skin → default chroma | `defaultChromaId` | Used to pick the skin's cover image |
 | Charm / spray level → item | nesting (`levels`) | |
 | Weapon → category | `weapons[].category` | Rifle, SMG, Sniper, Sidearm, Shotgun, Heavy, Melee |
-| Character → abilities | nesting (`abilities`) | |
+| Ability → character | nesting (`abilities`), label prefix | 121 abilities across 29 characters; slots ability1/2, grenade, ultimate, passive |
 | Collection (inferred) | names | See below |
 | Same item, other variants | shared ID | base / killstream / listview / splash |
 
@@ -152,11 +171,11 @@ The URL hash holds the current folder selection, query and open image, so a view
 
 ## Open questions
 
-1. **Which folders and variants are in the full dump?** Needed to check that every filename parses, to give variants friendly labels, and to see whether chroma and level images (the bulk of the 11,000) are named by their own IDs.
+None that block milestone 1. To confirm before milestone 2, a few sample filenames from `Abilities`, `Characters`, `PlayerCards` and `WeaponSkins` would show the variant suffixes and whether the ability files use the `<character id>_Ability1` labels. If not, the unmatched-files report will show it on the first run against the full dump.
 
 ## Decisions
 
-- **Full dump size:** about 11,000 files, over 1 GB. Thumbnails are pre-generated in the background from the start.
+- **Full dump:** 11,262 files in 12 folders, over 1 GB (folder list above). Thumbnails are pre-generated in the background from the start.
 - **Language:** English is the primary language for display and search; other languages are an opt-in search toggle.
 - **Content location:** the full dump lives in the repo's `content/` and is replaced about monthly. Generated files stay out of git.
 - **Relationships:** in v1, including collections inferred from names.
