@@ -262,12 +262,11 @@ def create_app(
         folder: list[str] = Query(default=[]),
         q: str = "",
         langs: bool = False,
-        tag: list[str] = Query(default=[]),
         color: list[int] = Query(default=[]),
         kind: list[str] = Query(default=[]),
         variant: list[str] = Query(default=[]),
     ) -> index.Filters:
-        return index.Filters(folder, q, langs, tag, color, kind, variant)
+        return index.Filters(folder, q, langs, color, kind, variant)
 
     def _ready_or_409() -> Ready:
         ready = session.ready
@@ -291,10 +290,10 @@ def create_app(
         return {"total": total, "offset": offset, "images": rows}
 
     @app.get("/api/facets")
-    def api_facets(f: index.Filters = Depends(filters), min_refs: int = Query(default=3, ge=1)):
+    def api_facets(f: index.Filters = Depends(filters)):
         ready = _ready_or_409()
         with closing(index.connect(ready.db_path)) as conn:
-            return index.facets(conn, f, min_refs=min_refs)
+            return index.facets(conn, f)
 
     @app.get("/api/image")
     def api_image(path: str):

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import catalog as catalog_mod
-from . import colors, scan, tags
+from . import colors, scan
 from .library import Library
 
 SCHEMA_VERSION = "2"
@@ -48,9 +48,6 @@ CREATE VIRTUAL TABLE entries_fts USING fts5(
     key UNINDEXED, name, description, other_names, ident, context,
     tokenize = 'unicode61 remove_diacritics 2', prefix = '2 3'
 );
-CREATE TABLE entry_tags (entry_key TEXT, tag TEXT, PRIMARY KEY (entry_key, tag));
-CREATE INDEX entry_tags_tag ON entry_tags(tag);
-CREATE TABLE tag_names (tag TEXT PRIMARY KEY, display TEXT);
 -- Colour shares per image (see colors.py), filled in the background after
 -- indexing; "analyzed" lists the images done, including those with no colours.
 CREATE TABLE image_colors (path TEXT, bin INTEGER, weight REAL, PRIMARY KEY (path, bin));
@@ -176,7 +173,7 @@ def _set_meta(conn: sqlite3.Connection, **values: str) -> None:
 
 
 def _write_entries(conn: sqlite3.Connection, cat: catalog_mod.Catalog | None) -> None:
-    for table in ("entries", "entries_fts", "entry_tags", "tag_names"):
+    for table in ("entries", "entries_fts"):
         conn.execute(f"DELETE FROM {table}")
     if cat is None:
         return
@@ -190,11 +187,6 @@ def _write_entries(conn: sqlite3.Connection, cat: catalog_mod.Catalog | None) ->
                     " ".join(x for x in (e.id, e.label) if x), " ".join(_context(cat, e))))
     conn.executemany("INSERT INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
     conn.executemany("INSERT INTO entries_fts VALUES (?,?,?,?,?,?)", fts)
-
-    per_name, display = tags.tag_names(sorted({e.name for e in cat.entries.values() if e.name}))
-    conn.executemany("INSERT INTO tag_names VALUES (?, ?)", display.items())
-    conn.executemany("INSERT OR IGNORE INTO entry_tags VALUES (?, ?)", (
-        (e.key, tag) for e in cat.entries.values() if e.name for tag in per_name[e.name]))
 
 
 def references(cat: catalog_mod.Catalog, e: catalog_mod.Entry) -> list[tuple[str, catalog_mod.Entry]]:
@@ -312,14 +304,13 @@ BASE_VARIANT = "base"  # how the filters name images with no variant
 class Filters:
     """What the grid shows: images in these folders that match everything else.
 
-    Several tags or colours must all match; several kinds or variants match
+    Several colours must all match; several kinds or variants match
     any of them.
     """
 
     folders: list[str]
     q: str = ""
     all_languages: bool = False
-    tags: list[str] = field(default_factory=list)
     colors: list[int] = field(default_factory=list)
     kinds: list[str] = field(default_factory=list)
     variants: list[str] = field(default_factory=list)
@@ -349,10 +340,6 @@ def _where(f: Filters, skip: str = "") -> tuple[str, list]:
         else:
             conds.append("i.path LIKE ? ESCAPE '\\'")
             args.append(like)
-    if skip != "tags":
-        for tag in f.tags:
-            conds.append("i.entry_key IN (SELECT entry_key FROM entry_tags WHERE tag = ?)")
-            args.append(tag.casefold())
     if skip != "colors":
         for bin_id in f.colors:
             conds.append("EXISTS (SELECT 1 FROM image_colors c WHERE c.path = i.path "
@@ -389,23 +376,11 @@ def list_images(conn: sqlite3.Connection, f: Filters, sort: str = "name",
     return total, [dict(row) for row in rows]
 
 
-def facets(conn: sqlite3.Connection, f: Filters, min_refs: int = 3, tag_limit: int = 400) -> dict:
+def facets(conn: sqlite3.Connection, f: Filters) -> dict:
     """Counts for the filter controls, over the images the other filters match.
 
-    Tags count items (catalog entries) rather than files, so a skin's three
-    variants count once. Colours count images with at least
-    ``colors.MATCH_SHARE`` of the colour.
+    Colours count images with at least ``colors.MATCH_SHARE`` of the colour.
     """
-    # Tags count within everything selected, tags included, so picking one
-    # tag shows which other tags its items have.
-    tag_where, tag_args = _where(f)
-    tag_rows = conn.execute(
-        f"SELECT t.tag, n.display, COUNT(DISTINCT i.entry_key) AS refs {FROM} "
-        f"JOIN entry_tags t ON t.entry_key = i.entry_key JOIN tag_names n ON n.tag = t.tag "
-        f"WHERE {tag_where} GROUP BY t.tag HAVING refs >= ? ORDER BY refs DESC, t.tag",
-        [*tag_args, min_refs],
-    ).fetchall()
-
     where, args = _where(f, skip="colors")
     color_counts = dict(conn.execute(
         f"SELECT c.bin, COUNT(*) {FROM} JOIN image_colors c ON c.path = i.path AND c.weight >= ? "
@@ -423,8 +398,6 @@ def facets(conn: sqlite3.Connection, f: Filters, min_refs: int = 3, tag_limit: i
         f"SELECT COUNT(a.path), COUNT(*) {FROM} LEFT JOIN analyzed a ON a.path = i.path WHERE {where}",
         args).fetchone()
     return {
-        "tags": [{"tag": t, "name": d, "refs": n} for t, d, n in tag_rows[:tag_limit]],
-        "tags_total": len(tag_rows),
         "colors": [{"id": b.id, "name": b.name, "hex": b.hex, "count": color_counts.get(b.id, 0)}
                    for b in colors.BINS],
         "colors_analyzed": analyzed,
@@ -476,9 +449,6 @@ def image_detail(conn: sqlite3.Connection, path: str) -> dict | None:
         "key": e["key"], "id": e["id"], "label": e["label"], "section": e["section"], "kind": e["kind"],
         "name": e["name"], "description": e["description"], "fields": fields,
         "names": json.loads(e["names_json"]), "raw": json.loads(e["raw_json"]),
-        "tags": [{"tag": t, "name": d} for t, d in conn.execute(
-            "SELECT t.tag, n.display FROM entry_tags t JOIN tag_names n ON n.tag = t.tag "
-            "WHERE t.entry_key = ? ORDER BY t.rowid", (key,))],
     }
     detail["variants"] = [dict(r) for r in conn.execute(
         f"SELECT {IMAGE_COLUMNS} FROM images i WHERE i.entry_key = ? ORDER BY i.variant != '', i.variant, i.path",

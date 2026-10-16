@@ -11,7 +11,7 @@ See [docs/PLAN.md](docs/PLAN.md) for the full design.
 | 1. Skeleton (open a content folder, list its folders) | Done |
 | 2. Catalog and scan (match images to catalog entries) | Done |
 | 3. Grid browsing | Done |
-| 4. Search, filters, tags, colors, details panel | Done |
+| 4. Search, filters, colors, details panel | Done |
 | 5. Relationships (collections, "show all" links) | Partly done (details panel shows parents, contents and links) |
 | 6. Full dump and refresh | Not started |
 
@@ -39,12 +39,11 @@ A browser tab opens on the repo's `content` folder. Use **Change folder…** to 
 **Filter.** In the sidebar:
 
 - **Colors**: each image's main colors, worked out in the background after indexing. Click a swatch (the number is how many images have that color) to show images with at least 10% of it, best matches first. Pick several to need all of them.
-- **Tags**: the words in item names, with how many items use each. Only words used by at least 3 items are listed; change **Min** to see more or fewer. Pick several tags to narrow down.
 - **Kind** and **Variant**: the kind of catalog item (weapon skins › chromas, player cards, …) and the file variant.
 
 The counts follow the other filters, and the filters in use show above the grid, where you can remove them one at a time or all at once. The address bar keeps everything, so you can bookmark a view.
 
-**Details.** Click a tile to open its details: a large preview, its other variants, its colors and tags (click one to filter by it), and everything the catalog says about it. Fields that point at another item, like a skin's weapon, are links; the panel also shows what the item belongs to, what it contains and what links to it (a weapon's skins). Use ← and → to step through the grid and Esc to close. **Copy path** and **Copy ID** copy to the clipboard; Ctrl+click a tile to open the full image in a new tab instead.
+**Details.** Click a tile to open its details: a large preview, its other variants, its colors (click one to filter by it), and everything the catalog says about it. Fields that point at another item, like a skin's weapon, are links; the panel also shows what the item belongs to, what it contains and what links to it (a weapon's skins). Use ← and → to step through the grid and Esc to close. **Copy path** and **Copy ID** copy to the clipboard; Ctrl+click a tile to open the full image in a new tab instead.
 
 **Match report.** The **Match report** tab shows how the files match the catalog (per folder, which catalog kinds and variants it holds, and any files that match nothing) and **what the catalog holds**: for each kind of item, how often it has a description, names in other languages, and each other field, with example values.
 

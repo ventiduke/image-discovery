@@ -3,7 +3,6 @@
   "use strict";
   const TOKEN = window.IF_TOKEN;
   const PAGE = 200; // images per request
-  const TAGS_SHOWN = 60; // tags listed before "Show all"
   const $ = (id) => document.getElementById(id);
   const fmt = (n) => n.toLocaleString("en-US");
   const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
@@ -17,14 +16,12 @@
   // What's shown; kept in the URL hash so a view can be bookmarked or reloaded.
   const state = {
     folders: new Set(), view: "images", sort: "name",
-    q: "", langs: false, tags: [], colors: [], kinds: [], variants: [],
+    q: "", langs: false, colors: [], kinds: [], variants: [],
   };
   // The grid: images loaded so far. `run` counts restarts, so a page that
   // arrives after a restart is dropped.
   const grid = { key: "", run: 0, loaded: 0, total: null, loading: false, items: [] };
   let facets = null;
-  let tagNames = {}; // tag -> display name, for the active-filter chips
-  let showAllTags = false;
   let current = -1; // index into grid.items of the image in the details panel
 
   async function api(path, body) {
@@ -80,7 +77,6 @@
     state.sort = ["name", "folder", "size"].includes(p.get("sort")) ? p.get("sort") : "name";
     state.q = p.get("q") || "";
     state.langs = p.get("langs") === "1";
-    state.tags = list("tags");
     state.colors = list("colors").map(Number).filter((n) => Number.isInteger(n));
     state.kinds = list("kinds");
     state.variants = list("variants");
@@ -93,7 +89,7 @@
     if (state.sort !== "name") p.set("sort", state.sort);
     if (state.q) p.set("q", state.q);
     if (state.langs) p.set("langs", "1");
-    for (const key of ["tags", "colors", "kinds", "variants"]) {
+    for (const key of ["colors", "kinds", "variants"]) {
       if (state[key].length) p.set(key, state[key].join(","));
     }
     const hash = p.toString();
@@ -106,7 +102,6 @@
     for (const name of library.folders.map((f) => f.name)) if (state.folders.has(name)) p.append("folder", name);
     if (state.q) p.set("q", state.q);
     if (state.langs) p.set("langs", "true");
-    for (const t of state.tags) p.append("tag", t);
     for (const c of state.colors) p.append("color", c);
     for (const k of state.kinds) p.append("kind", k);
     for (const v of state.variants) p.append("variant", v);
@@ -230,7 +225,6 @@
       chips.push(b);
     };
     if (state.q) chip(`“${state.q}”`, "search", () => { state.q = ""; });
-    for (const t of state.tags) chip(`# ${tagNames[t] || t}`, "tag", () => { state.tags = state.tags.filter((x) => x !== t); });
     for (const c of state.colors) {
       const bin = colorBin(c);
       const dot = el("span", { className: "dot" });
@@ -244,7 +238,7 @@
     if (!chips.length) { box.replaceChildren(); return; }
     const clear = el("button", { className: "link", textContent: "Clear all" });
     clear.addEventListener("click", () => {
-      Object.assign(state, { q: "", tags: [], colors: [], kinds: [], variants: [] });
+      Object.assign(state, { q: "", colors: [], kinds: [], variants: [] });
       syncControls();
       filtersChanged();
     });
@@ -256,12 +250,10 @@
     $("langs").checked = state.langs;
   }
 
-  // -- filter lists (colors, tags, kinds, variants) --------------------------------
+  // -- filter lists (colors, kinds, variants) ----------------------------------------
 
   function facetsQuery() {
-    const p = filterParams();
-    p.set("min_refs", $("min-refs").value || 3);
-    return p.toString();
+    return filterParams().toString();
   }
 
   async function loadFacets() {
@@ -271,7 +263,6 @@
     try { result = await api(`/api/facets?${key}`); } catch (e) { return; }
     if (key !== facetsQuery() || result.error) return; // filters changed meanwhile
     facets = result;
-    for (const t of facets.tags) tagNames[t.tag] = t.name;
     renderFacets();
     renderActiveFilters();
   }
@@ -304,30 +295,6 @@
         b.addEventListener("click", () => { state.colors = toggle(state.colors, c.id); filtersChanged(); });
         return b;
       }));
-    }
-    // Tags
-    const list = $("tag-list");
-    const more = $("more-tags");
-    if (!ready) {
-      list.replaceChildren();
-      more.hidden = true;
-    } else {
-      const needle = $("tag-filter").value.trim().toLowerCase();
-      let tags = facets.tags.filter((t) => !needle || t.name.toLowerCase().includes(needle));
-      // Selected tags first, so they're easy to find and remove.
-      tags = [...tags.filter((t) => state.tags.includes(t.tag)), ...tags.filter((t) => !state.tags.includes(t.tag))];
-      const shown = showAllTags || needle ? tags : tags.slice(0, TAGS_SHOWN);
-      list.replaceChildren(...shown.map((t) => {
-        const b = el("button", { className: "tag-btn", title: `${plural(t.refs, "item")} with “${t.name}” in the name` },
-          t.name, el("span", { className: "n", textContent: ` ${fmt(t.refs)}` }));
-        b.setAttribute("aria-pressed", String(state.tags.includes(t.tag)));
-        b.addEventListener("click", () => { state.tags = toggle(state.tags, t.tag); filtersChanged(); });
-        return el("li", {}, b);
-      }));
-      if (!shown.length) list.append(el("li", { className: "hint", textContent: "No tags used this often here." }));
-      const hiddenCount = facets.tags_total - shown.length;
-      more.hidden = needle !== "" || (hiddenCount <= 0 && !showAllTags);
-      more.textContent = showAllTags ? "Show fewer" : `Show all ${fmt(facets.tags_total)}`;
     }
     // Kinds and variants
     const facetList = (id, items, key, label, field) => {
@@ -544,15 +511,6 @@
     }
 
     if (entry) {
-      if (entry.tags.length) {
-        body.push(el("h3", { textContent: "Tags" }), el("div", { className: "chips" }, entry.tags.map((t) => {
-          tagNames[t.tag] = t.name;
-          const b = el("button", { className: "tag-btn", textContent: t.name, title: `Show items with “${t.name}” in the name` });
-          b.setAttribute("aria-pressed", String(state.tags.includes(t.tag)));
-          b.addEventListener("click", () => { state.tags = toggle(state.tags, t.tag); filtersChanged(); renderDetail(d); });
-          return b;
-        })));
-      }
       const rows = [];
       const row = (label, value) => rows.push(el("tr", {}, el("th", { textContent: label }), el("td", {}, value)));
       if (entry.description) row("Description", entry.description);
@@ -864,16 +822,6 @@
   }, 250);
   $("search").addEventListener("input", searchChanged);
   $("langs").addEventListener("change", () => { state.langs = $("langs").checked; if (state.q) filtersChanged(); else writeHash(); });
-
-  $("tag-filter").addEventListener("input", renderFacets);
-  $("min-refs").value = prefs.get("minRefs", 3);
-  $("min-refs").addEventListener("change", () => {
-    const n = Math.max(1, Number($("min-refs").value) || 3);
-    $("min-refs").value = n;
-    prefs.set("minRefs", n);
-    loadFacets();
-  });
-  $("more-tags").addEventListener("click", () => { showAllTags = !showAllTags; renderFacets(); });
 
   $("sort").addEventListener("change", () => {
     state.sort = $("sort").value;

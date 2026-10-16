@@ -130,7 +130,7 @@ def test_images_lists_a_page(ready):
 def test_images_take_filters(ready):
     res = ready.get("/api/images", params={"folder": ["Maps", "Weapons"], "q": "kasb"}).json()
     assert res["total"] == 2 and {i["name"] for i in res["images"]} == {"Kasbah"}
-    res = ready.get("/api/images", params={"folder": "Weapons", "tag": "vandal"}).json()
+    res = ready.get("/api/images", params={"folder": "Weapons", "q": "vandal"}).json()
     assert res["total"] == 2
     res = ready.get("/api/images", params={"folder": "Weapons", "variant": "killstream"}).json()
     assert res["total"] == 35
@@ -140,10 +140,7 @@ def test_images_take_filters(ready):
 def test_facets_detail_and_catalog(ready):
     facets = ready.get("/api/facets", params={"folder": ["Maps", "Weapons"]}).json()
     assert len(facets["colors"]) == 28 and facets["colors_analyzed"] == 0  # not worked out (warming is off)
-    assert {"tag": "vandal", "name": "Vandal", "refs": 1} not in facets["tags"]  # one item: under 3
-    assert any(t["refs"] >= 3 for t in facets["tags"]) or facets["tags"] == []
-    tags1 = ready.get("/api/facets", params={"folder": "Weapons", "min_refs": 1}).json()["tags"]
-    assert {"tag": "vandal", "name": "Vandal", "refs": 1} in tags1
+    assert {k["kind"] for k in facets["kinds"]} == {"maps", "weapons"}
     path = ready.get("/api/images", params={"folder": "Weapons", "q": "vandal"}).json()["images"][0]["path"]
     detail = ready.get("/api/image", params={"path": path}).json()
     assert detail["entry"]["name"] == "Vandal"

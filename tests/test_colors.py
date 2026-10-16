@@ -1,6 +1,6 @@
 from PIL import Image
 
-from imagefind import colors, tags
+from imagefind import colors
 
 
 def test_bins():
@@ -34,17 +34,3 @@ def test_analyze_skips_transparency_and_small_shares():
     assert colors.analyze(Image.new("RGBA", (10, 10), (0, 0, 0, 0))) == {}
     assert sum(colors.analyze(Image.new("RGB", (10, 10), (250, 250, 250))).values()) == 1.0
 
-
-def test_words():
-    assert tags.words("Reaver Vandal Level 2") == ["Reaver", "Vandal", "Level"]
-    assert tags.words("Viper's Pit") == ["Viper", "Pit"]
-    assert tags.words("The Range of the Range") == ["Range"]
-    assert tags.words("K/O") == []
-    assert tags.words("Gauntlet: Glitched") == ["Gauntlet", "Glitched"]
-    assert tags.words("// VCT25 x Sentinels") == ["VCT25", "Sentinels"]
-
-
-def test_tag_names_pick_the_usual_spelling():
-    per_name, display = tags.tag_names(["VCT Card", "VCT Spray", "Vct Buddy"])
-    assert per_name["Vct Buddy"] == ["vct", "buddy"]
-    assert display["vct"] == "VCT"

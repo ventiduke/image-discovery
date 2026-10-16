@@ -222,12 +222,10 @@ def test_search(content, tmp_path):
         assert len(paths(conn, everything)) == 4
 
 
-def test_tags_and_kind_and_variant_filters(content, tmp_path):
+def test_kind_and_variant_filters(content, tmp_path):
     db = db_of(tmp_path)
     index.build(open_library(content), db)
     with closing(index.connect(db)) as conn:
-        assert paths(conn, F("Maps", "Abilities", tags=["ascent"])) == ["Maps/M1.png", "Maps/M1_splash.png"]
-        assert paths(conn, F("Maps", "Abilities", tags=["Ascent", "wingman"])) == []
         assert paths(conn, F("Maps", "Abilities", kinds=["characters.abilities"])) == ["Abilities/C1_Ability1.png"]
         assert paths(conn, F("Maps", "Abilities", variants=["splash"])) == ["Maps/M1_splash.png"]
         assert len(paths(conn, F("Maps", "Abilities", variants=["base"]))) == 3
@@ -274,18 +272,13 @@ def test_facets(content, tmp_path):
     index.build(open_library(content), db)
     with closing(index.connect(db)) as conn:
         everything = F("Maps", "Abilities")
-        tags = {t["tag"]: t["refs"] for t in index.facets(conn, everything, min_refs=1)["tags"]}
-        # Items, not files: Ascent's two variants count once.
-        assert tags == {"ascent": 2, "night": 2, "bind": 1, "market": 1, "wingman": 1}
-        assert {t["tag"] for t in index.facets(conn, everything, min_refs=2)["tags"]} == {"ascent", "night"}
-        assert index.facets(conn, everything, min_refs=2)["tags_total"] == 2
-        narrowed = {t["tag"]: t["refs"] for t in index.facets(conn, F("Maps", tags=["night"]), min_refs=1)["tags"]}
-        assert narrowed == {"night": 2, "ascent": 1, "market": 1}
+        assert "tags" not in index.facets(conn, everything)
         result = index.facets(conn, F("Maps", "Abilities", kinds=["maps"]))
         # A filter's own counts ignore its own selection.
         assert {k["kind"]: k["count"] for k in result["kinds"]} == {"maps": 5, "characters.abilities": 1}
         assert {v["variant"]: v["count"] for v in result["variants"]} == {"base": 4, "splash": 1}
-        assert next(t for t in index.facets(conn, everything, min_refs=1)["tags"] if t["tag"] == "ascent")["name"] == "Ascent"
+        searched = index.facets(conn, F("Maps", "Abilities", q="night"))
+        assert {k["kind"]: k["count"] for k in searched["kinds"]} == {"maps": 2}
 
 
 def test_image_detail(content, tmp_path):
@@ -306,7 +299,6 @@ def test_image_detail(content, tmp_path):
         assert [v["variant"] for v in weapon["variants"]] == ["", "killstream"]
         assert [c["name"] for c in weapon["colors"]] == ["Red", "White"] and weapon["analyzed"]
         assert [r["name"] for r in weapon["referenced_by"]] == ["Reaver Vandal"]  # the skin
-        assert weapon["entry"]["tags"] == [{"tag": "vandal", "name": "Vandal"}]
         assert weapon["entry"]["names"] == {"fr-FR": "Vandal (fr)"}
 
         chroma = index.image_detail(conn, "Maps/K1.png")
