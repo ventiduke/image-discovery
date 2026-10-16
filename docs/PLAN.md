@@ -2,7 +2,7 @@
 
 Oct 16, 2026
 
-**Progress:** milestones 1 (skeleton) and 2 (catalog and scan) are built. Against a synthetic dump of 10,453 files with the real catalog, the first index takes about 3 seconds and later ones about 0.2 seconds.
+**Progress:** milestones 1 (skeleton), 2 (catalog and scan) and 3 (grid browsing) are built. Against a synthetic dump of 10,453 files with the real catalog, the first index takes about 3 seconds and later ones about 0.2 seconds; the 7,408 images larger than a thumbnail get thumbnails in about 30 seconds on 4 cores. The full dump has been checked: every file matches a catalog entry.
 
 ## Goal and scope
 

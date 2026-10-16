@@ -166,3 +166,27 @@ def test_content_folder_is_never_written(content, tmp_path):
     before = sorted(p.relative_to(content) for p in content.rglob("*"))
     index.build(open_library(content), db_of(tmp_path))
     assert sorted(p.relative_to(content) for p in content.rglob("*")) == before
+
+
+def test_list_images_sorts_pages_and_filters(content, tmp_path):
+    db = db_of(tmp_path)
+    (content / "Abilities" / "big.png").write_bytes(PNG + b"\0" * 1000)
+    index.build(open_library(content), db)
+    with index.connect(db) as conn:
+        total, rows = index.list_images(conn, ["Maps", "Abilities"])
+        assert total == 5
+        # By English name, unmatched files by filename, variants after the base image.
+        assert [(r["name"] or r["stem"], r["variant"]) for r in rows] == [
+            ("Ascent", ""), ("Ascent", "splash"), ("big", ""), ("mystery", ""), ("Wingman", ""),
+        ]
+        assert rows[0]["kind"] == "maps" and rows[2]["entry_key"] is None
+        assert [r["path"] for r in index.list_images(conn, ["Maps", "Abilities"], offset=1, limit=2)[1]] == \
+            ["Maps/M1_splash.png", "Abilities/big.png"]
+        assert index.list_images(conn, ["Maps", "Abilities"], sort="size")[1][0]["path"] == "Abilities/big.png"
+        assert [r["folder"] for r in index.list_images(conn, ["Maps", "Abilities"], sort="folder")[1]] == \
+            ["Abilities", "Abilities", "Maps", "Maps", "Maps"]
+        assert index.list_images(conn, []) == (0, [])
+        assert index.list_images(conn, ["Nope"])[0] == 0
+        assert index.image(conn, "Maps/M1.png")["width"] == 64
+        assert index.image(conn, "../secret.png") is None
+        assert len(index.all_images(conn)) == 5

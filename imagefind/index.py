@@ -241,3 +241,41 @@ def report(db_path: Path, unmatched_limit: int = 500) -> dict:
         "unmatched_total": unmatched_total,
         "unmatched": unmatched,
     }
+
+
+SORTS = {
+    # Images without a catalog name sort by filename among the named ones.
+    "name": "COALESCE(NULLIF(e.name, ''), i.stem) COLLATE NOCASE, i.variant, i.path",
+    "folder": "i.folder COLLATE NOCASE, COALESCE(NULLIF(e.name, ''), i.stem) COLLATE NOCASE, i.variant, i.path",
+    "size": "i.size DESC, i.path",
+}
+
+
+def list_images(conn: sqlite3.Connection, folders: list[str], sort: str = "name",
+                offset: int = 0, limit: int = 200) -> tuple[int, list[dict]]:
+    """One page of images in the given folders, and how many there are in all."""
+    if not folders:
+        return 0, []
+    marks = ",".join("?" * len(folders))
+    total = conn.execute(f"SELECT COUNT(*) FROM images WHERE folder IN ({marks})", folders).fetchone()[0]
+    rows = conn.execute(
+        f"SELECT i.path, i.folder, i.stem, i.variant, i.entry_key, i.size, i.mtime_ns, i.width, i.height, "
+        f"e.name, e.kind FROM images i LEFT JOIN entries e ON e.key = i.entry_key "
+        f"WHERE i.folder IN ({marks}) ORDER BY {SORTS.get(sort, SORTS['name'])} LIMIT ? OFFSET ?",
+        [*folders, limit, offset],
+    ).fetchall()
+    return total, [dict(row) for row in rows]
+
+
+def image(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT path, size, mtime_ns, width, height FROM images WHERE path = ?", (path,)
+    ).fetchone()
+
+
+def all_images(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every image, folder by folder, for making thumbnails ahead of time."""
+    return conn.execute(
+        "SELECT path, size, mtime_ns, width, height FROM images "
+        "ORDER BY folder COLLATE NOCASE, path"
+    ).fetchall()

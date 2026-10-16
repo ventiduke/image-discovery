@@ -20,8 +20,15 @@ def picked():
 @pytest.fixture
 def client(picked, tmp_path):
     app = create_app(allowed_hosts={HOST}, api_token=TOKEN, pick=lambda _: picked["path"],
-                     cache_for=lambda root: tmp_path / "cache")
+                     cache_for=lambda root: tmp_path / "cache", warm_thumbnails=False)
     return TestClient(app, headers={"X-IF-Token": TOKEN})
+
+
+@pytest.fixture
+def ready(client):
+    client.post("/api/open", json={"path": str(CONTENT)})
+    assert client.app.state.session.wait()["state"] == "ready"
+    return client
 
 
 # -- security ---------------------------------------------------------------
@@ -73,7 +80,7 @@ def test_open_indexes_in_the_background(client):
     client.post("/api/open", json={"path": str(CONTENT)})
     status = client.app.state.session.wait()
     assert status["state"] == "ready"
-    assert client.get("/api/status").json() == status
+    assert client.get("/api/status").json()["report"] == status["report"]
     report = status["report"]
     assert report["images"] == report["matched"] > 0
     assert {f["name"] for f in report["folders"]} == {"Maps", "Weapons"}
@@ -99,6 +106,62 @@ def test_reopening_drops_the_older_build(client, tmp_path):
     client.post("/api/open", json={"path": str(other)})
     status = session.wait()
     assert status["state"] == "ready" and status["report"]["images"] == 1
+
+
+# -- grid, thumbnails and files ---------------------------------------------------
+
+
+def test_images_wait_for_the_index(client):
+    assert client.get("/api/images", params={"folder": "Maps"}).status_code == 409
+
+
+def test_images_lists_a_page(ready):
+    res = ready.get("/api/images", params={"folder": ["Maps", "Weapons"], "limit": 5, "offset": 2})
+    assert res.status_code == 200
+    page = res.json()
+    assert page["total"] == 74 and page["offset"] == 2 and len(page["images"]) == 5
+    first = page["images"][0]
+    assert first["name"] and first["kind"] in ("maps", "weapons")
+    assert first["thumb"].startswith(f"/thumb/{first['path']}?v=")
+    assert first["file"].startswith(f"/file/{first['path']}?v=")
+    assert ready.get("/api/images", params={"limit": 5000}).status_code == 422
+
+
+def test_thumbnails_and_originals(ready, tmp_path):
+    big = "Maps/1C18AB1F-420D-0D8B-71D0-77AD3C439115_listview.png"  # 456 x 100
+    res = ready.get(f"/thumb/{big}")
+    assert res.status_code == 200 and res.headers["content-type"] == "image/webp"
+    assert "immutable" in res.headers["cache-control"]
+    assert len(list((tmp_path / "cache" / "thumbs").rglob("*.webp"))) == 1
+    small = "Weapons/5261A41B-4C56-8EB5-9E46-7193F363477E_killstream.png"  # 96 x 50: served as is
+    res = ready.get(f"/thumb/{small}")
+    assert res.headers["content-type"] == "image/png"
+    assert res.content == (CONTENT / small).read_bytes()
+    assert ready.get(f"/file/{big}").content == (CONTENT / big).read_bytes()
+
+
+@pytest.mark.parametrize("path", [
+    "/thumb/../pyproject.toml", "/file/%2E%2E/pyproject.toml", "/file/PublicContentCatalog.json",
+    "/file/Maps/nope.png", "/thumb/Maps/Readme.md",
+])
+def test_only_indexed_images_are_served(ready, path):
+    assert ready.get(path).status_code == 404
+
+
+def test_thumbnails_are_warmed_after_indexing(tmp_path):
+    app = create_app(allowed_hosts={HOST}, api_token=TOKEN, cache_for=lambda root: tmp_path)
+    c = TestClient(app, headers={"X-IF-Token": TOKEN})
+    c.post("/api/open", json={"path": str(CONTENT)})
+    session = app.state.session
+    session.wait()
+    session.warmer.join(60)
+    thumbs = c.get("/api/status").json()["thumbs"]
+    assert thumbs["done"] == thumbs["total"] > 0 and thumbs["failed"] == 0 and not thumbs["running"]
+    assert len(list((tmp_path / "thumbs").rglob("*.webp"))) == thumbs["total"]
+    # Opening the folder again finds nothing left to do.
+    c.post("/api/open", json={"path": str(CONTENT)})
+    session.wait()
+    assert c.get("/api/status").json()["thumbs"]["total"] == 0
 
 
 def test_open_rejects_bad_path(client):

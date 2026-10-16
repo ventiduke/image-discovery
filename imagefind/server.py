@@ -6,14 +6,17 @@ import mimetypes
 import secrets
 import threading
 import time
+from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import index, picker
+from . import index, picker, thumbs
 from .library import Library, LibraryError, open_library
 from .presence import Presence
 
@@ -26,6 +29,9 @@ for _type, _ext in [("text/javascript", ".js"), ("text/css", ".css")]:
     mimetypes.add_type(_type, _ext)
 
 _no_store = {"Cache-Control": "no-store"}
+# Image URLs carry the file's size and modification time (?v=...), so a
+# changed file gets a new URL and the browser can keep the old one for good.
+_cache_forever = {"Cache-Control": "private, max-age=31536000, immutable"}
 
 
 class OpenRequest(BaseModel):
@@ -37,22 +43,43 @@ class PresenceRequest(BaseModel):
     state: str
 
 
+@dataclass(frozen=True)
+class Ready:
+    """An indexed content folder: what the grid and thumbnails read from."""
+
+    root: Path
+    db_path: Path
+    thumbs_dir: Path
+
+
 class Session:
     """The content folder open in this run of the server, and its index.
 
     Opening a folder returns at once; the index is built on a background
     thread and :attr:`status` reports its progress. Opening another folder
     while one is indexing lets that build finish, but its result is dropped.
+    Once indexed, missing thumbnails are made in the background.
     """
 
-    def __init__(self, cache_for: Callable[[Path], Path] = index.cache_dir) -> None:
+    def __init__(self, cache_for: Callable[[Path], Path] = index.cache_dir,
+                 warm_thumbnails: bool = True) -> None:
         self.cache_for = cache_for
+        self.warm_thumbnails = warm_thumbnails
         self.library: Library | None = None
         self.status: dict = {"state": "none"}
-        self.db_path: Path | None = None
+        self.ready: Ready | None = None
+        self.warmer: thumbs.Warmer | None = None
         self._generation = 0
         self._lock = threading.Lock()
         self._build_lock = threading.Lock()  # one build at a time
+
+    def current_status(self) -> dict:
+        status = dict(self.status)
+        warmer = self.warmer
+        if status["state"] == "ready" and warmer is not None:
+            status["thumbs"] = {"done": warmer.done, "total": warmer.total,
+                                "failed": warmer.failed, "running": warmer.running}
+        return status
 
     def open(self, raw_path: str | Path, rebuild: bool = False) -> Library:
         library = open_library(raw_path)
@@ -60,8 +87,11 @@ class Session:
             self._generation += 1
             generation = self._generation
             self.library = library
-            self.db_path = None
+            self.ready = None
             self.status = {"state": "indexing", "done": 0, "total": library.images}
+            if self.warmer:
+                self.warmer.stop()
+                self.warmer = None
         threading.Thread(
             target=self._index, args=(library, generation, rebuild), daemon=True
         ).start()
@@ -75,7 +105,8 @@ class Session:
         return self.status
 
     def _index(self, library: Library, generation: int, rebuild: bool) -> None:
-        db_path = self.cache_for(library.root) / "index.sqlite"
+        cache = self.cache_for(library.root)
+        db_path = cache / "index.sqlite"
 
         def progress(done: int, total: int) -> None:
             self._publish(generation, {"state": "indexing", "done": done, "total": total})
@@ -87,10 +118,26 @@ class Session:
         except Exception as exc:
             self._publish(generation, {"state": "error", "error": f"Indexing failed: {exc}"})
             return
+        ready = Ready(library.root, db_path, cache / "thumbs")
+        warmer = self._start_warmer(ready) if self.warm_thumbnails else None
         with self._lock:
             if generation == self._generation:
-                self.db_path = db_path
+                self.ready = ready
+                self.warmer = warmer
                 self.status = {"state": "ready", "seconds": result.seconds, "report": report}
+            elif warmer:
+                warmer.stop()
+
+    def _start_warmer(self, ready: Ready) -> thumbs.Warmer:
+        with closing(index.connect(ready.db_path)) as conn:
+            rows = index.all_images(conn)
+        jobs = [
+            (ready.root / row["path"],
+             thumbs.thumb_path(ready.thumbs_dir, row["path"], row["size"], row["mtime_ns"]))
+            for row in rows if thumbs.needs_thumbnail(row["width"], row["height"])
+        ]
+        jobs = [job for job in jobs if not job[1].exists()]
+        return thumbs.Warmer(jobs, total=len(jobs))
 
     def _publish(self, generation: int, status: dict) -> None:
         with self._lock:
@@ -107,9 +154,10 @@ def create_app(
     on_exit: Callable[[], None] = lambda: None,
     presence: Presence | None = None,
     cache_for: Callable[[Path], Path] = index.cache_dir,
+    warm_thumbnails: bool = True,
 ) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    session = Session(cache_for)
+    session = Session(cache_for, warm_thumbnails)
     if pick is None:
         dialog = picker.Picker()
         pick, cancel_pick = dialog.pick, dialog.cancel
@@ -138,7 +186,7 @@ def create_app(
     # -- pages ------------------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse)
-    def index():
+    def page():
         page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         return HTMLResponse(page.replace("{{API_TOKEN}}", api_token), headers=_no_store)
 
@@ -161,7 +209,59 @@ def create_app(
 
     @app.get("/api/status")
     def api_status():
-        return session.status
+        return session.current_status()
+
+    @app.get("/api/images")
+    def api_images(
+        folder: list[str] = Query(default=[]),
+        sort: str = "name",
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=200, ge=1, le=1000),
+    ):
+        ready = session.ready
+        if ready is None:
+            return JSONResponse({"error": "The folder is still being indexed."}, status_code=409)
+        with closing(index.connect(ready.db_path)) as conn:
+            total, rows = index.list_images(conn, folder, sort, offset, limit)
+        for row in rows:
+            version = f"{row.pop('size')}-{row.pop('mtime_ns')}"
+            url = quote(row["path"])
+            row["thumb"] = f"/thumb/{url}?v={version}"
+            row["file"] = f"/file/{url}?v={version}"
+            row["name"] = row["name"] or row["stem"]
+        return {"total": total, "offset": offset, "images": rows}
+
+    # -- images ---------------------------------------------------------------
+
+    def _image_or_404(path: str) -> tuple[Ready, object]:
+        ready = session.ready
+        if ready is None:
+            raise HTTPException(404)
+        # Only files the index knows about: nothing else on disk can be read.
+        with closing(index.connect(ready.db_path)) as conn:
+            row = index.image(conn, path)
+        if row is None or not (ready.root / path).is_file():
+            raise HTTPException(404)
+        return ready, row
+
+    @app.get("/thumb/{path:path}")
+    def thumbnail(path: str):
+        ready, row = _image_or_404(path)
+        source = ready.root / path
+        if not thumbs.needs_thumbnail(row["width"], row["height"]):
+            return FileResponse(source, headers=_cache_forever)
+        target = thumbs.thumb_path(ready.thumbs_dir, path, row["size"], row["mtime_ns"])
+        if not target.exists():
+            try:
+                thumbs.make(source, target)
+            except Exception:
+                raise HTTPException(415, "Can't make a thumbnail of this image.") from None
+        return FileResponse(target, media_type="image/webp", headers=_cache_forever)
+
+    @app.get("/file/{path:path}")
+    def original(path: str):
+        ready, _row = _image_or_404(path)
+        return FileResponse(ready.root / path, headers=_cache_forever)
 
     @app.post("/api/open")
     def api_open(body: OpenRequest):

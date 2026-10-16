@@ -10,7 +10,7 @@ See [docs/PLAN.md](docs/PLAN.md) for the full design.
 | --- | --- |
 | 1. Skeleton (open a content folder, list its folders) | Done |
 | 2. Catalog and scan (match images to catalog entries) | Done |
-| 3. Grid browsing | Not started |
+| 3. Grid browsing | Done |
 | 4. Search and filters | Not started |
 | 5. Relationships and detail panel | Not started |
 | 6. Full dump and refresh | Not started |
@@ -30,7 +30,13 @@ uv run imagefind
 
 A browser tab opens on the repo's `content` folder. Use **Change folder…** to open a different content folder.
 
-The first time a folder is opened, the tool indexes it: it reads the catalog and every image's size, and matches each file to its catalog entry. For the full dump this takes a few seconds; after that only new or changed files are re-read. The index is kept in the git-ignored `.cache` folder (for folders outside the repo, in your user cache folder), never in the content folder.
+## Using it
+
+**Browse.** Tick folders on the left and scroll through their images. Each tile shows the item's English name from the catalog, its variant (`splash`, `killstream`, …) and, when more than one folder is ticked, its folder. Sort by name, folder or file size, and use the **Size** slider to make the tiles bigger or smaller. Click a tile to open the full image in a new tab. The address bar keeps the folders and sort, so you can bookmark a view.
+
+**Match report.** The **Match report** tab shows how the files match the catalog: per folder, which catalog kinds and variants it holds, and any files that match nothing.
+
+The first time a folder is opened, the tool indexes it: it reads the catalog and every image's size, and matches each file to its catalog entry. For the full dump this takes a few seconds; after that only new or changed files are re-read. It then makes small thumbnails of the large images in the background, which takes a minute or two the first time (the grid works meanwhile) and only covers new or changed images after that. The index and thumbnails are kept in the git-ignored `.cache` folder (for folders outside the repo, in your user cache folder), never in the content folder.
 
 **Stopping it.** Click **Exit**, or just close the browser tab: the tool notices when none of its tabs are open any more and stops by itself about 15 seconds later. Ctrl+C in the terminal also works.
 
